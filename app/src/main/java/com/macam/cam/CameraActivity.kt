@@ -105,13 +105,29 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onResume() {
         super.onResume()
+        blurHandler.postDelayed(blurTick, 300)
         orientationListener.enable()
         val missing = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
             .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 1) else startCamera()
     }
 
+    /** Copie l'aperçu ~12 fois par seconde en très basse définition pour le flou des panneaux. */
+    private val blurTick = object : Runnable {
+        override fun run() {
+            val sv = surfaceView
+            if (sv.holder.surface.isValid && sv.width > 0) {
+                val small = android.graphics.Bitmap.createBitmap(maxOf(1, sv.width / 8), maxOf(1, sv.height / 8), android.graphics.Bitmap.Config.ARGB_8888)
+                try {
+                    android.view.PixelCopy.request(sv, small, { r -> if (r == android.view.PixelCopy.SUCCESS) Backdrop.update(small) }, blurHandler)
+                } catch (_: Exception) {}
+            }
+            blurHandler.postDelayed(this, 80)
+        }
+    }
+
     override fun onPause() {
+        blurHandler.removeCallbacks(blurTick)
         orientationListener.disable()
         cam?.release(); cam = null
         photo?.release(); photo = null
@@ -198,12 +214,13 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     /** L'aperçu est en paysage (16:9) mais l'écran est en portrait : on affiche en 9:16. */
     private fun layoutPreview(size: Size) {
         val w = resources.displayMetrics.widthPixels
-        // 4:3 (photo) : collé en haut sous l'info ; 16:9 (vidéo) : centré, presque plein écran.
+        // L'aperçu part du haut : l'info flotte dessus, et le bas passe sous la carte de verre.
         val tall = size.width * 3 > size.height * 4 + 1
-        val lp = FrameLayout.LayoutParams(w, w * size.width / size.height, if (tall) Gravity.CENTER else Gravity.TOP)
-        if (!tall) lp.topMargin = 52.dp
+        // Photo 4:3 : ancrée par le bas, ses 70 derniers dp passent sous la carte de verre.
+        val lp = FrameLayout.LayoutParams(w, w * size.width / size.height, if (tall) Gravity.TOP else Gravity.BOTTOM)
+        if (!tall) lp.bottomMargin = 150.dp
         surfaceView.layoutParams = lp
-        overlay.layoutParams = FrameLayout.LayoutParams(lp.width, lp.height, lp.gravity).apply { topMargin = lp.topMargin }
+        overlay.layoutParams = FrameLayout.LayoutParams(lp.width, lp.height, lp.gravity).apply { bottomMargin = lp.bottomMargin }
     }
 
     // ------------------------------------------------------------------ interface
@@ -211,23 +228,35 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     // ------------------------------------------------------------------ design « verre dépoli »
 
     private val Int.dp get() = (this * resources.displayMetrics.density).toInt()
-    private val accent = 0xFFFFC94D.toInt()
+    /** Accent « menthe glacée » : la signature visuelle de Ma Cam. */
+    private val accent = 0xFF7FE8D6.toInt()
+    private val accentInk = 0xFF0B1F1C.toInt()
+    private var settingsOpen = false
+    private lateinit var gearBtn: Button
+    private lateinit var panelGlass: GlassView
+    private val blurHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /** Panneau translucide : voile clair + liseré lumineux, comme une plaque de verre sur l'aperçu. */
     private fun glass(radiusDp: Int, fill: Int = 0x1FFFFFFF, stroke: Int = 0x3DFFFFFF, topOnly: Boolean = false) =
         GradientDrawable().apply {
-            setColor(fill)
+            // Verre de pastille : un léger dégradé vertical imite la lumière qui glisse sur la surface.
+            orientation = GradientDrawable.Orientation.TOP_BOTTOM
+            colors = intArrayOf(lighten(fill), fill)
             setStroke(1.dp, stroke)
             val r = radiusDp.dp.toFloat()
             if (topOnly) cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) else cornerRadius = r
         }
 
+    private fun lighten(c: Int): Int {
+        val a = (c ushr 24); if (a == 0) return c
+        return ((minOf(255, a + 0x18)) shl 24) or (c and 0xFFFFFF)
+    }
+
     private fun buildUi() {
         surfaceView = SurfaceView(this).apply { holder.addCallback(this@CameraActivity) }
         info = TextView(this).apply {
             setTextColor(Color.WHITE); textSize = 12f; letterSpacing = 0.04f
-            setPadding(14.dp, 7.dp, 14.dp, 7.dp)
-            background = glass(18, fill = 0x33000000, stroke = 0x33FFFFFF)
+            setPadding(16.dp, 8.dp, 16.dp, 8.dp)
             typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
         }
         lensRow = row(); modeRow = row()
@@ -256,8 +285,8 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         tabRow = row().apply {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(4.dp, 4.dp, 4.dp, 4.dp)
-            background = glass(24, fill = 0x26000000)
-            for (t in Tab.entries) addView(chip(t.label, tabIcons[t]) { switchTab(t) }.apply { background = glass(20, 0, 0) })
+            background = GradientDrawable().apply { cornerRadius = 24.dp.toFloat(); setColor(0x33000000) }
+            for (t in Tab.entries) addView(chip(t.label, tabIcons[t]) { switchTab(t) })
         }
 
         evBar = slider(-24, 24) { v -> cam?.let { it.settings.evSteps = v; it.applySettings() } }
@@ -277,24 +306,41 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         styleShutter()
         overlay = ImageView(this).apply { scaleType = ImageView.ScaleType.MATRIX }
 
-        // L'aperçu occupe tout l'écran ; les commandes flottent dessus dans des panneaux de verre.
-        val panel = LinearLayout(this).apply {
+        gearBtn = Button(this).apply {
+            contentDescription = "Réglages"; stateListAnimator = null; text = ""
+            val d = getDrawable(R.drawable.ic_tune)!!.mutate().apply { setBounds(0, 0, 22.dp, 22.dp) }
+            setCompoundDrawablesRelative(d, null, null, null); setPadding(11.dp, 0, 0, 0)
+            background = glass(23)
+            setOnClickListener { settingsOpen = !settingsOpen; refreshButtons() }
+        }
+        val shutterRow = LinearLayout(this).apply {
+            gravity = Gravity.CENTER
+            addView(View(this@CameraActivity), LinearLayout.LayoutParams(46.dp, 46.dp))
+            addView(recordBtn, LinearLayout.LayoutParams(76.dp, 76.dp).apply { setMargins(36.dp, 0, 36.dp, 0) })
+            addView(gearBtn, LinearLayout.LayoutParams(46.dp, 46.dp))
+        }
+
+        // Carte de verre flottante (détachée des bords) qui floute réellement l'aperçu situé derrière.
+        val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, 10.dp, 0, 12.dp)
-            background = glass(28, fill = 0x59101418, stroke = 0x2EFFFFFF, topOnly = true)
+            setPadding(0, 12.dp, 0, 12.dp)
             addView(scroll(lensRow).center()); addView(scroll(modeRow)); addView(scroll(settingsRow))
             addView(scroll(toolsRow)); addView(scroll(photoRow).center())
             addView(manualPanel)
-            addView(recordBtn, LinearLayout.LayoutParams(76.dp, 76.dp).apply { gravity = Gravity.CENTER_HORIZONTAL; setMargins(0, 8.dp, 0, 10.dp) })
-            addView(scroll(tabRow).center(), LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL })
+            addView(shutterRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { setMargins(0, 8.dp, 0, 10.dp) })
+            addView(tabRow, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL })
         }
+        panelGlass = GlassView(this, 30.dp.toFloat()).apply { addView(content) }
+        val infoGlass = GlassView(this, 19.dp.toFloat(), tint = 0x40101418).apply { elevation = 4.dp.toFloat(); addView(info) }
+        Backdrop.source = surfaceView
+
         setContentView(FrameLayout(this).apply {
             fitsSystemWindows = true
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(0xFF050607.toInt())
             addView(surfaceView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
             addView(this@CameraActivity.overlay, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
-            addView(info, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = 12.dp })
-            addView(panel, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM))
+            addView(infoGlass, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = 12.dp })
+            addView(panelGlass, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(10.dp, 0, 10.dp, 10.dp) })
         })
         layoutPreview(Size(1440, 1080))
     }
@@ -309,6 +355,17 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         layoutPreview(if (t == Tab.VIDEO) Size(1920, 1080) else Size(1440, 1080))
         overlay.scaleType = ImageView.ScaleType.CENTER_CROP
         overlay.setImageBitmap(scene)
+        settingsOpen = t == Tab.VIDEO
+        // Sans caméra, le flou part de l'image d'exemple (même cadrage que l'aperçu).
+        val pw = resources.displayMetrics.widthPixels
+        val ph = pw * (if (t == Tab.VIDEO) 1920 else 1440) / 1080
+        val small = android.graphics.Bitmap.createBitmap(pw / 8, ph / 8, android.graphics.Bitmap.Config.ARGB_8888)
+        android.graphics.Canvas(small).apply {
+            val sc = maxOf(small.width.toFloat() / scene.width, small.height.toFloat() / scene.height)
+            translate((small.width - scene.width * sc) / 2, (small.height - scene.height * sc) / 2); scale(sc, sc)
+            drawBitmap(scene, 0f, 0f, android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+        }
+        Backdrop.update(small)
         info.text = status
         for (i in 0 until tabRow.childCount) (tabRow.getChildAt(i) as Button).selected(Tab.entries[i] == t)
         lensRow.removeAllViews(); modeRow.removeAllViews()
@@ -352,7 +409,13 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private fun row() = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(10.dp, 4.dp, 10.dp, 4.dp)
     }
-    private fun scroll(v: View) = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(v) }
+    /** Rangée défilante : les bords s'estompent pour signaler qu'il y a d'autres options. */
+    private fun scroll(v: View) = HorizontalScrollView(this).apply {
+        isHorizontalScrollBarEnabled = false
+        isHorizontalFadingEdgeEnabled = true
+        setFadingEdgeLength(28.dp)
+        addView(v)
+    }
 
     /** Pastille de verre avec icône à trait fin. */
     private fun chip(label: String, icon: Int? = null, onClick: () -> Unit) = Button(this).apply {
@@ -372,8 +435,8 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun Button.selected(on: Boolean) {
-        background = if (on) glass(18, fill = accent, stroke = accent) else glass(18)
-        val fg = if (on) 0xFF1A1A1A.toInt() else Color.WHITE
+        background = if (on) glass(18, fill = accent, stroke = 0x66FFFFFF) else glass(18)
+        val fg = if (on) accentInk else Color.WHITE
         setTextColor(fg)
         compoundDrawablesRelative[0]?.setTint(fg)
         alpha = if (isEnabled) 1f else 0.4f
@@ -442,9 +505,13 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
 
     private fun refreshButtons() {
         val video = tab == Tab.VIDEO
-        for (r in listOf(modeRow, settingsRow, toolsRow)) (r.parent as View).visibility = if (video) View.VISIBLE else View.GONE
-        (photoRow.parent as View).visibility = if (video) View.GONE else View.VISIBLE
-        manualPanel.visibility = if (video) View.VISIBLE else View.GONE
+        val vis = { b: Boolean -> if (b) View.VISIBLE else View.GONE }
+        (modeRow.parent as View).visibility = vis(video)
+        // Réglages détaillés repliés derrière le bouton ⚙ pour laisser l'image respirer.
+        for (r in listOf(settingsRow, toolsRow)) (r.parent as View).visibility = vis(video && settingsOpen)
+        (photoRow.parent as View).visibility = vis(!video && settingsOpen)
+        manualPanel.visibility = vis(video && settingsOpen)
+        gearBtn.selected(settingsOpen)
         styleShutter()
         photo?.let { p ->
             dngBtn.selected(p.saveDng); dngBtn.isEnabled = p.mode != PhotoMode.PORTRAIT
