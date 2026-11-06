@@ -2,7 +2,21 @@
 
 Application caméra Android qui améliore la photo et la vidéo par traitement logiciel.
 
-## Étape 1 : diagnostic (`app/`, v0.1)
+## Étape 2 : caméra vidéo (v0.3)
+
+L'écran principal est une caméra vidéo qui ouvre directement chaque objectif physique :
+
+- choix de l'objectif (ultra grand-angle, principal, téléobjectif, avant) ;
+- modes 4K30 et 4K60 en HDR (HEVC 10 bits HLG) ou en SDR, 4K120 et 1080p240 quand l'objectif les permet ;
+- exposition auto, verrouillée ou manuelle (ISO, obturation), correction EV, mise au point auto ou manuelle,
+  balance des blancs auto, verrouillée ou en préréglage, stabilisation électronique activable, débit 50/75/100 Mb/s ;
+- son AAC 48 kHz stéréo ;
+- journal gyroscope au format Gyroflow (`.gcsv`).
+
+Les vidéos sont enregistrées dans `DCIM/MaCam/` et les journaux gyroscope dans `Download/MaCam/`, avec le même nom.
+Pour Gyroflow, filmez avec « Stab. OFF » : la stabilisation électronique du téléphone fausse la correction.
+
+## Étape 1 : diagnostic (bouton « Diagnostic »)
 
 L'application de diagnostic vérifie ce que le téléphone donne réellement aux applications tierces :
 

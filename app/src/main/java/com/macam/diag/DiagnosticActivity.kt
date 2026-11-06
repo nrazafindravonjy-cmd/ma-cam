@@ -15,7 +15,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import java.io.File
 
-class MainActivity : Activity() {
+class DiagnosticActivity : Activity() {
 
     private lateinit var output: TextView
     private lateinit var runBtn: Button
@@ -34,7 +34,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             fitsSystemWindows = true
             addView(buttons, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-            addView(ScrollView(this@MainActivity).apply { addView(output) }, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+            addView(ScrollView(this@DiagnosticActivity).apply { addView(output) }, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         }
         setContentView(root)
         // Si le diagnostic précédent s'est interrompu (plantage), on réaffiche son rapport partiel.

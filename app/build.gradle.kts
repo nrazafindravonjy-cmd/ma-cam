@@ -4,14 +4,14 @@ plugins {
 }
 
 android {
-    namespace = "com.macam.diag"
+    namespace = "com.macam"
     compileSdk = 36
     defaultConfig {
-        applicationId = "com.macam.diag"
-        minSdk = 24
+        applicationId = "com.macam"
+        minSdk = 29
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2-diagnostic"
+        versionCode = 3
+        versionName = "0.3-video"
     }
     buildTypes {
         release { isMinifyEnabled = false }
