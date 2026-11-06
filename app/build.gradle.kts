@@ -10,8 +10,8 @@ android {
         applicationId = "com.macam.diag"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1-diagnostic"
+        versionCode = 2
+        versionName = "0.2-diagnostic"
     }
     buildTypes {
         release { isMinifyEnabled = false }

@@ -37,6 +37,13 @@ class MainActivity : Activity() {
             addView(ScrollView(this@MainActivity).apply { addView(output) }, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         }
         setContentView(root)
+        // Si le diagnostic précédent s'est interrompu (plantage), on réaffiche son rapport partiel.
+        val previous = File(getExternalFilesDir(null), "rapport_diagnostic.txt")
+        if (previous.exists() && previous.length() > 0 && !previous.readText().contains("FIN DU DIAGNOSTIC")) {
+            report.append(previous.readText())
+            output.text = "Rapport précédent interrompu :\n\n" + report
+            return
+        }
         output.text = "Ce test ouvre chaque caméra et enregistre de courtes vidéos de test (environ 1 minute). " +
             "Posez le téléphone et appuyez sur « Lancer le diagnostic »."
     }
@@ -49,11 +56,12 @@ class MainActivity : Activity() {
         report.clear()
         output.text = ""
         Thread {
+            val file = File(getExternalFilesDir(null), "rapport_diagnostic.txt").apply { writeText("") }
             val log: (String) -> Unit = { line ->
-                synchronized(report) { report.appendLine(line) }
+                synchronized(report) { report.appendLine(line); runCatching { file.appendText(line + "\n") } }
                 runOnUiThread { output.append(line + "\n") }
             }
-            log("Ma Cam – diagnostic v0.1 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            log("Ma Cam – diagnostic v0.2 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
             val cm = getSystemService(CameraManager::class.java)
             try {
                 val sb = StringBuilder(); CameraInfo.report(this, cm, sb); log(sb.toString())
@@ -65,7 +73,6 @@ class MainActivity : Activity() {
                 tests.tenBitRecording()
             } catch (e: Throwable) { log("ERREUR tests : $e") } finally { tests.close() }
             log("\n##### FIN DU DIAGNOSTIC #####")
-            runCatching { File(getExternalFilesDir(null), "rapport_diagnostic.txt").writeText(report.toString()) }
             runOnUiThread { runBtn.isEnabled = true }
         }.start()
     }

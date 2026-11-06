@@ -160,7 +160,7 @@ class StreamTests(private val ctx: Context, private val log: (String) -> Unit) {
             if (profile == DynamicRangeProfiles.HLG10 && !hlgOk) continue
             for (fps in listOf(30, 60)) {
                 log("→ 3840x2160 à $fps i/s, $label")
-                runCatchingLog { record(id, Size(3840, 2160), fps, profile, label) }
+                runCatchingLog(40) { record(id, Size(3840, 2160), fps, profile, label) }
             }
         }
     }
@@ -261,7 +261,14 @@ class StreamTests(private val ctx: Context, private val log: (String) -> Unit) {
 
     private fun MediaFormat.getIntegerOrNull(k: String): Int? = if (containsKey(k)) getInteger(k) else null
 
-    private inline fun runCatchingLog(block: () -> Unit) {
-        try { block() } catch (e: Throwable) { log("   ÉCHEC : ${e.javaClass.simpleName}: ${e.message}") }
+    /** Exécute un test avec une limite de temps : un pilote caméra bloqué ne fige plus tout le diagnostic. */
+    private fun runCatchingLog(timeoutSec: Long = 20, block: () -> Unit) {
+        val t = Thread {
+            try { block() } catch (e: Throwable) { log("   ÉCHEC : ${e.javaClass.simpleName}: ${e.message}") }
+        }
+        t.isDaemon = true
+        t.start()
+        t.join(timeoutSec * 1000)
+        if (t.isAlive) log("   BLOQUÉ : aucune réponse du pilote caméra après $timeoutSec s, test abandonné")
     }
 }
