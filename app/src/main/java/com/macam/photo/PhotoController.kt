@@ -52,7 +52,8 @@ class PhotoController(
     private val worker = Executors.newSingleThreadExecutor()
 
     val lenses: List<Lens> = Lens.list(cm)
-    var lens: Lens = lenses.first { !it.front && it.hasOis }; private set
+    var lens: Lens = Lens.main(lenses); private set
+    private var currentJob: BurstJob? = null
     var mode = PhotoMode.PHOTO; private set
     /** Zoom super-résolution 2× sur l'objectif courant. */
     var superRes = false; private set
@@ -71,6 +72,8 @@ class PhotoController(
     fun start(l: Lens = lens, m: PhotoMode = mode, sr: Boolean = superRes) = handler.post { reopen(l, m, sr) }
 
     fun release() = handler.post {
+        // Une photo en cours de traitement est terminée avec les images déjà reçues, pas perdue.
+        currentJob?.let { j -> worker.execute { j.forceComplete() } }
         close(); motion.stop(); worker.shutdown(); thread.quitSafely()
     }
 
@@ -90,16 +93,24 @@ class PhotoController(
         if (m == PhotoMode.NIGHT) motion.start() else motion.stop()
         // Le mode Portrait passe par l'extension du fabricant, disponible sur la caméra logique.
         val id = if (m == PhotoMode.PORTRAIT) logicalId(l.front) ?: return onError("Portrait indisponible") else l.id
+        open(id, if (m == PhotoMode.PORTRAIT) id else l.parentId, m)
+    }
+
+    /** Repli sur la caméra logique si l'objectif physique ne peut pas être ouvert directement. */
+    @SuppressLint("MissingPermission")
+    private fun open(id: String, parent: String, m: PhotoMode) {
+        val retry = { if (id != parent) open(parent, parent, m) else onError("Ouverture impossible") }
         try {
             cm.openCamera(id, executor, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) {
                     device = d
-                    if (m == PhotoMode.PORTRAIT) configurePortrait(d) else configure(d)
+                    try { if (m == PhotoMode.PORTRAIT) configurePortrait(d) else configure(d) }
+                    catch (e: Exception) { onError("Session impossible : ${e.message}") }
                 }
                 override fun onDisconnected(d: CameraDevice) { d.close() }
-                override fun onError(d: CameraDevice, e: Int) { d.close(); onError("Erreur caméra $e") }
+                override fun onError(d: CameraDevice, e: Int) { d.close(); if (device == null) retry() else onError("Erreur caméra $e") }
             })
-        } catch (e: Exception) { onError("Ouverture impossible : ${e.message}") }
+        } catch (e: Exception) { retry() }
     }
 
     private fun logicalId(front: Boolean) = cm.cameraIdList.firstOrNull {
@@ -132,6 +143,7 @@ class PhotoController(
         val r = ImageReader.newInstance(size.width, size.height, fmt, 3)
         reader = r
         val pv = previewSurface(previewSize()); preview = pv
+        if (!pv.isValid) return onError("Aperçu indisponible, réessayez")
         val outs = listOf(OutputConfiguration(pv), OutputConfiguration(r.surface))
         d.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outs, executor,
             object : CameraCaptureSession.StateCallback() {
@@ -219,10 +231,14 @@ class PhotoController(
         var firstResult: TotalCaptureResult? = null
         var received = 0
         val job = BurstJob(p.frames)
+        currentJob = job
+        // Garde-fou : si des images n'arrivent jamais (capture annulée), on termine avec celles reçues.
+        val deadlineMs = p.exposureNs * p.frames / 1_000_000 + 15_000
+        handler.postDelayed({ worker.execute { job.forceComplete() } }, deadlineMs)
         job.onDone = { engine, result ->
             try { finishAndSave(engine, result, name, rotation, p) }
             catch (e: Throwable) { onError("Traitement impossible : ${e.message}") }
-            finally { engine.close(); busy = false }
+            finally { engine.close(); busy = false; if (currentJob == job) currentJob = null }
         }
 
         r.setOnImageAvailableListener({ rd ->
@@ -260,6 +276,8 @@ class PhotoController(
                 }
                 override fun onCaptureSequenceCompleted(s: CameraCaptureSession, id: Int, f: Long) { startPreview() }
                 override fun onCaptureFailed(s: CameraCaptureSession, rq: CaptureRequest, fl: CaptureFailure) { job.failed() }
+                override fun onCaptureBufferLost(s: CameraCaptureSession, rq: CaptureRequest, t: Surface, n: Long) { job.failed() }
+                override fun onCaptureSequenceAborted(s: CameraCaptureSession, id: Int) { worker.execute { job.forceComplete() }; startPreview() }
             }, handler)
         } catch (e: Exception) {
             busy = false; onError("Capture impossible : ${e.message}"); startPreview(); return@post
@@ -291,6 +309,7 @@ class PhotoController(
         fun failed() = worker.execute { failures++; if (count + failures >= expected) complete() }
 
         fun add(f: Frame, refLatch: CountDownLatch, result: () -> TotalCaptureResult?) {
+            if (completed) return // image arrivée après le garde-fou
             refLatch.await(3, TimeUnit.SECONDS)
             val res = result()
             val e = engine ?: createEngine(f, res).also { engine = it }
@@ -300,6 +319,9 @@ class PhotoController(
             onStatus("Fusion $count/$expected")
             if (count + failures >= expected) complete()
         }
+
+        /** Termine avec les images déjà fusionnées (garde-fou, fermeture de l'appli). Fil de travail uniquement. */
+        fun forceComplete() { if (!completed) { if (engine == null) { completed = true; busy = false } else complete() } }
 
         /** Appelée sur le fil de travail uniquement. */
         private fun complete() {
@@ -380,10 +402,11 @@ class PhotoController(
         val ec = cm.getCameraExtensionCharacteristics(d.id)
         val ext = CameraExtensionCharacteristics.EXTENSION_BOKEH
         if (ext !in ec.supportedExtensions) return onError("Le fabricant ne fournit pas de mode Portrait")
-        val pvSize = ec.getExtensionSupportedSizes(ext, SurfaceTexture::class.java)
-            .filter { it.width * 3 == it.height * 4 }.maxByOrNull { if (it.width <= 1920) it.width else 0 }
-            ?: ec.getExtensionSupportedSizes(ext, SurfaceTexture::class.java).first()
-        val jpeg = ec.getExtensionSupportedSizes(ext, ImageFormat.JPEG).maxBy { it.width * it.height }
+        val pvSizes = ec.getExtensionSupportedSizes(ext, SurfaceTexture::class.java)
+        val pvSize = pvSizes.filter { it.width * 3 == it.height * 4 }.maxByOrNull { if (it.width <= 1920) it.width else 0 }
+            ?: pvSizes.firstOrNull() ?: return onError("Portrait : aucune taille d'aperçu")
+        val jpeg = ec.getExtensionSupportedSizes(ext, ImageFormat.JPEG).maxByOrNull { it.width * it.height }
+            ?: return onError("Portrait : aucune taille photo")
         val r = ImageReader.newInstance(jpeg.width, jpeg.height, ImageFormat.JPEG, 2); reader = r
         val pv = previewSurface(pvSize); preview = pv
         val cfg = ExtensionSessionConfiguration(ext, listOf(OutputConfiguration(pv), OutputConfiguration(r.surface)), executor,

@@ -21,7 +21,7 @@ import java.util.concurrent.Executor
 import kotlin.math.hypot
 
 /** Un objectif utilisable (capteur physique ouvert directement). */
-class Lens(val id: String, val chars: CameraCharacteristics, val front: Boolean) {
+class Lens(val id: String, val chars: CameraCharacteristics, val front: Boolean, val parentId: String = id) {
     val focalMm = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)!!.first()
     /** Focale équivalente 24×36. */
     val eqMm: Double = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)!!.let {
@@ -58,13 +58,16 @@ class Lens(val id: String, val chars: CameraCharacteristics, val front: Boolean)
                 val isFront = c.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_FRONT
                 val ids = c.physicalCameraIds.ifEmpty { setOf(id) }
                 for (pid in ids) {
-                    val lens = runCatching { Lens(pid, cm.getCameraCharacteristics(pid), isFront) }.getOrNull() ?: continue
+                    val lens = runCatching { Lens(pid, cm.getCameraCharacteristics(pid), isFront, id) }.getOrNull() ?: continue
                     (if (isFront) front else back) += lens
                 }
             }
             back.sortBy { it.eqMm }
             return back + front
         }
+
+        /** Objectif principal : arrière stabilisé si possible (beaucoup de modèles d'entrée de gamme n'ont pas d'OIS). */
+        fun main(list: List<Lens>) = list.firstOrNull { !it.front && it.hasOis } ?: list.firstOrNull { !it.front } ?: list.first()
     }
 }
 
@@ -114,7 +117,8 @@ class CameraController(
 ) {
     val tools = ProTools()
     private var analysis: android.media.ImageReader? = null
-    private var overlayBmp: android.graphics.Bitmap? = null
+    private val overlayBmps = arrayOfNulls<android.graphics.Bitmap>(2)
+    private var overlayFlip = false
     private var lastOverlay = 0L
     /** Désactivé pour la session courante si le pilote refuse le flux d'analyse. */
     private var analysisAllowed = true
@@ -124,7 +128,7 @@ class CameraController(
     private val executor = Executor { handler.post(it) }
 
     val lenses: List<Lens> = Lens.list(cm)
-    var lens: Lens = lenses.first { !it.front && it.hasOis } ; private set
+    var lens: Lens = Lens.main(lenses); private set
     var mode = Mode.UHD30_HLG; private set
     val settings = Settings()
 
@@ -167,13 +171,20 @@ class CameraController(
             ?: return onError("Aucun mode vidéo compatible avec cet objectif")
         settings.manualFocus = settings.manualFocus && !l.fixedFocus
         analysisAllowed = true
+        openWithFallback(l.id, l.parentId)
+    }
+
+    /** Certains fabricants interdisent d'ouvrir un objectif physique : on se replie sur la caméra logique. */
+    @SuppressLint("MissingPermission")
+    private fun openWithFallback(id: String, parent: String) {
+        val retry = { if (id != parent) openWithFallback(parent, parent) else onError("Ouverture impossible") }
         try {
-            cm.openCamera(l.id, executor, object : CameraDevice.StateCallback() {
+            cm.openCamera(id, executor, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) { device = d; configure() }
                 override fun onDisconnected(d: CameraDevice) { d.close(); if (device == d) device = null }
-                override fun onError(d: CameraDevice, e: Int) { d.close(); onError("Erreur caméra $e") }
+                override fun onError(d: CameraDevice, e: Int) { d.close(); if (device == null) retry() else onError("Erreur caméra $e") }
             })
-        } catch (e: Exception) { onError("Ouverture impossible : ${e.message}") }
+        } catch (e: Exception) { retry() }
     }
 
     /** (Re)crée la session : aperçu + encodeur préparé pour un démarrage instantané. */
@@ -200,7 +211,8 @@ class CameraController(
             }
         }
         val type = if (mode.highSpeed) SessionConfiguration.SESSION_HIGH_SPEED else SessionConfiguration.SESSION_REGULAR
-        dev.createCaptureSession(SessionConfiguration(type, outs, executor, object : CameraCaptureSession.StateCallback() {
+        if (!pv.isValid) { onError("Aperçu indisponible, réessayez"); return }
+        try { dev.createCaptureSession(SessionConfiguration(type, outs, executor, object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) { session = s; applySettingsInternal() }
             override fun onConfigureFailed(s: CameraCaptureSession) {
                 if (an != null) { // on réessaie sans le flux d'analyse (outils pro indisponibles)
@@ -209,7 +221,7 @@ class CameraController(
                     configure()
                 } else onError("Configuration refusée pour ${mode.label} sur cet objectif")
             }
-        }))
+        })) } catch (e: Exception) { onError("Session impossible : ${e.message}") }
     }
 
     /** Petit flux basse définition pour les outils pro (P010 en HDR, YUV sinon). */
@@ -225,8 +237,11 @@ class CameraController(
                 val now = SystemClock.uptimeMillis()
                 if (tools.anyEnabled && now - lastOverlay > 66) { // ~15 i/s suffisent pour un calque
                     lastOverlay = now
-                    val bmp = overlayBmp?.takeIf { it.width == img.width && it.height == img.height }
-                        ?: android.graphics.Bitmap.createBitmap(img.width, img.height, android.graphics.Bitmap.Config.ARGB_8888).also { overlayBmp = it }
+                    // Double tampon : on n'écrit jamais dans le bitmap affiché.
+                    overlayFlip = !overlayFlip
+                    val bmp = overlayBmps[if (overlayFlip) 1 else 0]?.takeIf { it.width == img.width && it.height == img.height }
+                        ?: android.graphics.Bitmap.createBitmap(img.width, img.height, android.graphics.Bitmap.Config.ARGB_8888)
+                            .also { overlayBmps[if (overlayFlip) 1 else 0] = it }
                     if (tools.render(img, bmp)) onOverlay(bmp)
                 }
             } finally { img.close() }
@@ -319,6 +334,10 @@ class CameraController(
             applySettingsInternal() // ajoute l'encodeur aux cibles : démarrage immédiat
             done(true)
         } catch (e: Exception) {
+            // Nettoie le fichier à moitié créé et prépare un nouvel encodeur.
+            armed = null
+            Thread { r.finish() }.start()
+            configure()
             onError("Enregistrement impossible : ${e.message}"); done(false)
         }
     }

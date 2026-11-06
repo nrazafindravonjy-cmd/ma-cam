@@ -20,6 +20,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowManager
 import android.widget.*
+import com.macam.R
 import com.macam.diag.DiagnosticActivity
 import com.macam.photo.PhotoController
 import com.macam.photo.PhotoMode
@@ -197,39 +198,66 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     /** L'aperçu est en paysage (16:9) mais l'écran est en portrait : on affiche en 9:16. */
     private fun layoutPreview(size: Size) {
         val w = resources.displayMetrics.widthPixels
-        val lp = FrameLayout.LayoutParams(w, w * size.width / size.height, Gravity.CENTER)
+        // 4:3 (photo) : collé en haut sous l'info ; 16:9 (vidéo) : centré, presque plein écran.
+        val tall = size.width * 3 > size.height * 4 + 1
+        val lp = FrameLayout.LayoutParams(w, w * size.width / size.height, if (tall) Gravity.CENTER else Gravity.TOP)
+        if (!tall) lp.topMargin = 52.dp
         surfaceView.layoutParams = lp
-        overlay.layoutParams = FrameLayout.LayoutParams(lp.width, lp.height, Gravity.CENTER)
+        overlay.layoutParams = FrameLayout.LayoutParams(lp.width, lp.height, lp.gravity).apply { topMargin = lp.topMargin }
     }
 
     // ------------------------------------------------------------------ interface
 
+    // ------------------------------------------------------------------ design « verre dépoli »
+
+    private val Int.dp get() = (this * resources.displayMetrics.density).toInt()
+    private val accent = 0xFFFFC94D.toInt()
+
+    /** Panneau translucide : voile clair + liseré lumineux, comme une plaque de verre sur l'aperçu. */
+    private fun glass(radiusDp: Int, fill: Int = 0x1FFFFFFF, stroke: Int = 0x3DFFFFFF, topOnly: Boolean = false) =
+        GradientDrawable().apply {
+            setColor(fill)
+            setStroke(1.dp, stroke)
+            val r = radiusDp.dp.toFloat()
+            if (topOnly) cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) else cornerRadius = r
+        }
+
     private fun buildUi() {
         surfaceView = SurfaceView(this).apply { holder.addCallback(this@CameraActivity) }
         info = TextView(this).apply {
-            setTextColor(Color.WHITE); textSize = 13f; setPadding(24, 12, 24, 12)
-            setBackgroundColor(0x88000000.toInt()); typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(Color.WHITE); textSize = 12f; letterSpacing = 0.04f
+            setPadding(14.dp, 7.dp, 14.dp, 7.dp)
+            background = glass(18, fill = 0x33000000, stroke = 0x33FFFFFF)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
         }
         lensRow = row(); modeRow = row()
 
-        expoBtn = chip("Expo auto") { cycleExposure() }
-        focusBtn = chip("MAP auto") { toggleFocus() }
-        wbBtn = chip("BdB auto") { cycleWb() }
-        eisBtn = chip("Stab. ON") { val c = cam ?: return@chip; c.settings.eis = !c.settings.eis; c.applySettings(); refreshButtons() }
-        rateBtn = chip("100 Mb/s") { cycleBitrate() }
-        gyroBtn = chip("Gyro ON") { val c = cam ?: return@chip; c.settings.gyroLog = !c.settings.gyroLog; refreshButtons() }
-        val diagBtn = chip("Diagnostic") { startActivity(Intent(this, DiagnosticActivity::class.java)) }
+        expoBtn = chip("Expo", R.drawable.ic_exposure) { cycleExposure() }
+        focusBtn = chip("MAP", R.drawable.ic_focus) { toggleFocus() }
+        wbBtn = chip("BdB", R.drawable.ic_wb) { cycleWb() }
+        eisBtn = chip("Stab.", R.drawable.ic_stab) { val c = cam ?: return@chip; c.settings.eis = !c.settings.eis; c.applySettings(); refreshButtons() }
+        rateBtn = chip("Débit", R.drawable.ic_bitrate) { cycleBitrate() }
+        gyroBtn = chip("Gyro", R.drawable.ic_gyro) { val c = cam ?: return@chip; c.settings.gyroLog = !c.settings.gyroLog; refreshButtons() }
+        val diagBtn = chip("Diagnostic", R.drawable.ic_diag) { startActivity(Intent(this, DiagnosticActivity::class.java)) }
         settingsRow = row().apply { listOf(expoBtn, focusBtn, wbBtn, eisBtn, rateBtn, gyroBtn).forEach { addView(it) } }
-        zebraBtn = chip("Zébras") { cam?.let { it.tools.zebra = !it.tools.zebra; it.applySettings() }; refreshButtons() }
-        peakBtn = chip("Peaking") { cam?.let { it.tools.peaking = !it.tools.peaking; it.applySettings() }; refreshButtons() }
-        falseBtn = chip("Fausses couleurs") { cam?.let { it.tools.falseColor = !it.tools.falseColor; it.applySettings() }; refreshButtons() }
-        flatBtn = chip("Profil plat") { cam?.let { it.settings.flat = !it.settings.flat; it.applySettings() }; refreshButtons() }
+        zebraBtn = chip("Zébras", R.drawable.ic_zebra) { cam?.let { it.tools.zebra = !it.tools.zebra; it.applySettings() }; refreshButtons() }
+        peakBtn = chip("Peaking", R.drawable.ic_peaking) { cam?.let { it.tools.peaking = !it.tools.peaking; it.applySettings() }; refreshButtons() }
+        falseBtn = chip("Couleurs", R.drawable.ic_falsecolor) { cam?.let { it.tools.falseColor = !it.tools.falseColor; it.applySettings() }; refreshButtons() }
+        flatBtn = chip("Plat", R.drawable.ic_flat) { cam?.let { it.settings.flat = !it.settings.flat; it.applySettings() }; refreshButtons() }
         toolsRow = row().apply { listOf(zebraBtn, peakBtn, falseBtn, flatBtn, diagBtn).forEach { addView(it) } }
-        dngBtn = chip("DNG") { photo?.let { it.saveDng = !it.saveDng }; refreshButtons() }
-        photoRow = row().apply { addView(dngBtn); addView(chip("Diagnostic") { startActivity(Intent(this@CameraActivity, DiagnosticActivity::class.java)) }) }
+        dngBtn = chip("DNG", R.drawable.ic_raw) { photo?.let { it.saveDng = !it.saveDng }; refreshButtons() }
+        photoRow = row().apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(dngBtn)
+            addView(chip("Diagnostic", R.drawable.ic_diag) { startActivity(Intent(this@CameraActivity, DiagnosticActivity::class.java)) })
+        }
+        val tabIcons = mapOf(Tab.PHOTO to R.drawable.ic_photo, Tab.NIGHT to R.drawable.ic_night,
+            Tab.PORTRAIT to R.drawable.ic_portrait, Tab.VIDEO to R.drawable.ic_video)
         tabRow = row().apply {
             gravity = Gravity.CENTER_HORIZONTAL
-            for (t in Tab.entries) addView(chip(t.label) { switchTab(t) })
+            setPadding(4.dp, 4.dp, 4.dp, 4.dp)
+            background = glass(24, fill = 0x26000000)
+            for (t in Tab.entries) addView(chip(t.label, tabIcons[t]) { switchTab(t) }.apply { background = glass(20, 0, 0) })
         }
 
         evBar = slider(-24, 24) { v -> cam?.let { it.settings.evSteps = v; it.applySettings() } }
@@ -237,61 +265,96 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         shutterBar = slider(0, shutters.size - 1) { v -> cam?.let { it.settings.exposureNs = 1_000_000_000L / shutters[v]; it.applySettings() } }
         focusBar = slider(0, 100) { v -> cam?.let { it.settings.focusDiopters = it.lens.minFocusDiopters * v / 100f; it.applySettings() } }
         manualPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(24, 0, 24, 0)
+            orientation = LinearLayout.VERTICAL; setPadding(20.dp, 0, 20.dp, 0)
             addLabeled("Correction EV", evBar); addLabeled("ISO", isoBar)
             addLabeled("Obturation", shutterBar); addLabeled("Mise au point (gauche = infini)", focusBar)
         }
 
         recordBtn = Button(this).apply {
-            text = "●"; textSize = 30f; setTextColor(Color.RED)
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) }
+            text = ""; contentDescription = "Déclencheur"
             setOnClickListener { if (tab == Tab.VIDEO) toggleRecording() else photo?.capture(deviceOrientation) }
         }
+        styleShutter()
         overlay = ImageView(this).apply { scaleType = ImageView.ScaleType.MATRIX }
 
-        val previewFrame = FrameLayout(this).apply {
+        // L'aperçu occupe tout l'écran ; les commandes flottent dessus dans des panneaux de verre.
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 10.dp, 0, 12.dp)
+            background = glass(28, fill = 0x59101418, stroke = 0x2EFFFFFF, topOnly = true)
+            addView(scroll(lensRow).center()); addView(scroll(modeRow)); addView(scroll(settingsRow))
+            addView(scroll(toolsRow)); addView(scroll(photoRow).center())
+            addView(manualPanel)
+            addView(recordBtn, LinearLayout.LayoutParams(76.dp, 76.dp).apply { gravity = Gravity.CENTER_HORIZONTAL; setMargins(0, 8.dp, 0, 10.dp) })
+            addView(scroll(tabRow).center(), LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        }
+        setContentView(FrameLayout(this).apply {
+            fitsSystemWindows = true
             setBackgroundColor(Color.BLACK)
             addView(surfaceView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
             addView(this@CameraActivity.overlay, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
-            addView(info, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP))
-        }
-        val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xFF101010.toInt())
-            addView(scroll(lensRow)); addView(scroll(modeRow)); addView(scroll(settingsRow))
-            addView(scroll(toolsRow)); addView(scroll(photoRow))
-            addView(manualPanel)
-            addView(recordBtn, LinearLayout.LayoutParams(180, 180).apply { gravity = Gravity.CENTER_HORIZONTAL; setMargins(0, 12, 0, 8) })
-            addView(scroll(tabRow).apply { isFillViewport = true }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 16 })
-        }
-        setContentView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            fitsSystemWindows = true
-            setBackgroundColor(Color.BLACK)
-            addView(previewFrame, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-            addView(controls, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(info, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = 12.dp })
+            addView(panel, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM))
         })
-        layoutPreview(Size(1920, 1080))
+        layoutPreview(Size(1440, 1080))
     }
 
-    private fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(12, 6, 12, 6) }
+    /** Déclencheur dessiné : anneau blanc + disque (photo), disque rouge (vidéo), carré rouge (enregistrement). */
+    private fun styleShutter() {
+        if (!::recordBtn.isInitialized) return
+        val video = tab == Tab.VIDEO
+        val rec = cam?.recording == true
+        val ring = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x22FFFFFF); setStroke(4.dp, Color.WHITE) }
+        val core = GradientDrawable().apply {
+            if (rec) { shape = GradientDrawable.RECTANGLE; cornerRadius = 6.dp.toFloat() } else shape = GradientDrawable.OVAL
+            setColor(if (video) 0xFFFF3B30.toInt() else Color.WHITE)
+        }
+        val inset = if (rec) 24.dp else 9.dp
+        recordBtn.background = android.graphics.drawable.LayerDrawable(arrayOf(ring, core)).apply {
+            setLayerInset(1, inset, inset, inset, inset)
+        }
+        recordBtn.alpha = if (recordBtn.isEnabled) 1f else 0.45f
+    }
+
+    private fun HorizontalScrollView.center() = apply {
+        layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL }
+    }
+
+    private fun row() = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(10.dp, 4.dp, 10.dp, 4.dp)
+    }
     private fun scroll(v: View) = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(v) }
 
-    private fun chip(label: String, onClick: () -> Unit) = Button(this).apply {
-        text = label; isAllCaps = false; textSize = 13f; setTextColor(Color.WHITE)
-        background = GradientDrawable().apply { cornerRadius = 40f; setColor(0xFF2A2A2A.toInt()) }
-        minWidth = 0; minimumWidth = 0; setPadding(28, 0, 28, 0)
-        layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, 96).apply { setMargins(6, 0, 6, 0) }
+    /** Pastille de verre avec icône à trait fin. */
+    private fun chip(label: String, icon: Int? = null, onClick: () -> Unit) = Button(this).apply {
+        text = label; isAllCaps = false; textSize = 12f; setTextColor(Color.WHITE)
+        typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+        background = glass(18)
+        stateListAnimator = null
+        minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+        setPadding(12.dp, 0, 14.dp, 0)
+        icon?.let {
+            val d = getDrawable(it)!!.mutate().apply { setBounds(0, 0, 18.dp, 18.dp) }
+            setCompoundDrawablesRelative(d, null, null, null)
+            compoundDrawablePadding = 6.dp
+        }
+        layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, 36.dp).apply { setMargins(4.dp, 0, 4.dp, 0) }
         setOnClickListener { onClick() }
     }
 
     private fun Button.selected(on: Boolean) {
-        (background as GradientDrawable).setColor(if (on) 0xFFFFC107.toInt() else 0xFF2A2A2A.toInt())
-        setTextColor(if (on) Color.BLACK else Color.WHITE)
+        background = if (on) glass(18, fill = accent, stroke = accent) else glass(18)
+        val fg = if (on) 0xFF1A1A1A.toInt() else Color.WHITE
+        setTextColor(fg)
+        compoundDrawablesRelative[0]?.setTint(fg)
+        alpha = if (isEnabled) 1f else 0.4f
     }
 
     private fun slider(min: Int, max: Int, onChange: (Int) -> Unit) = SeekBar(this).apply {
         this.min = min; this.max = max
+        progressTintList = android.content.res.ColorStateList.valueOf(accent)
+        thumbTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+        progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0x55FFFFFF)
         setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) { if (fromUser) onChange(p) }
             override fun onStartTrackingTouch(s: SeekBar) {}
@@ -300,7 +363,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun LinearLayout.addLabeled(label: String, bar: SeekBar) {
-        addView(TextView(context).apply { text = label; setTextColor(Color.LTGRAY); textSize = 11f })
+        addView(TextView(context).apply { text = label; setTextColor(0xB3FFFFFF.toInt()); textSize = 11f; letterSpacing = 0.05f })
         addView(bar)
     }
 
@@ -309,10 +372,10 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         photo?.let { p -> refreshPhotoRows(p); return }
         val c = cam ?: return
         lensRow.removeAllViews()
-        val main = c.lenses.firstOrNull { !it.front && it.hasOis } ?: c.lenses.first()
+        val main = Lens.main(c.lenses)
         for (l in c.lenses) {
             val label = if (l.front) "Avant" else "%.1fx".format(Locale.US, l.eqMm / main.eqMm).replace(".0x", "x")
-            lensRow.addView(chip(label) { if (!c.recording) { c.start(l, c.mode); handlerRefresh() } }.apply { selected(l == c.lens) })
+            lensRow.addView(lensChip(label) { if (!c.recording) { c.start(l, c.mode); handlerRefresh() } }.apply { selected(l == c.lens) })
         }
         modeRow.removeAllViews()
         for (m in Mode.entries) {
@@ -324,16 +387,23 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private fun refreshPhotoRows(p: PhotoController) {
         lensRow.removeAllViews(); modeRow.removeAllViews()
         if (p.mode == PhotoMode.PORTRAIT) return
-        val main = p.lenses.firstOrNull { !it.front && it.hasOis } ?: p.lenses.first()
+        val main = Lens.main(p.lenses)
         for (l in p.lenses) {
             val label = if (l.front) "Avant" else "%.1fx".format(Locale.US, l.eqMm / main.eqMm).replace(".0x", "x")
-            lensRow.addView(chip(label) { if (!p.busy) { p.start(l, p.mode, false); photoRefresh() } }
+            lensRow.addView(lensChip(label) { if (!p.busy) { p.start(l, p.mode, false); photoRefresh() } }
                 .apply { selected(l == p.lens && !p.superRes) })
             // Zoom super-résolution 2× proposé juste après l'objectif principal.
             if (l == main && p.mode == PhotoMode.PHOTO)
-                lensRow.addView(chip("2x SR") { if (!p.busy) { p.start(main, p.mode, true); photoRefresh() } }
+                lensRow.addView(chip("2× SR", R.drawable.ic_zoom) { if (!p.busy) { p.start(main, p.mode, true); photoRefresh() } }
                     .apply { selected(p.superRes) })
         }
+    }
+
+    /** Pastille ronde pour le choix d'objectif (0.6x, 1x, 5x…). */
+    private fun lensChip(label: String, onClick: () -> Unit) = chip(label, null, onClick).apply {
+        setPadding(0, 0, 0, 0); textSize = 11f
+        layoutParams = LinearLayout.LayoutParams(40.dp, 40.dp).apply { setMargins(5.dp, 0, 5.dp, 0) }
+        background = glass(20)
     }
 
     private fun photoRefresh() { photo?.handler?.post { runOnUiThread { refreshRows(); refreshButtons() } } }
@@ -346,8 +416,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         for (r in listOf(modeRow, settingsRow, toolsRow)) (r.parent as View).visibility = if (video) View.VISIBLE else View.GONE
         (photoRow.parent as View).visibility = if (video) View.GONE else View.VISIBLE
         manualPanel.visibility = if (video) View.VISIBLE else View.GONE
-        recordBtn.text = if (video) (if (cam?.recording == true) "■" else "●") else "◉"
-        recordBtn.setTextColor(if (video) Color.RED else Color.BLACK)
+        styleShutter()
         photo?.let { p ->
             dngBtn.selected(p.saveDng); dngBtn.isEnabled = p.mode != PhotoMode.PORTRAIT
             recordBtn.isEnabled = !p.busy
@@ -357,14 +426,14 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         flatBtn.selected(c.settings.flat); flatBtn.isEnabled = !c.mode.tenBit && !c.mode.highSpeed
         val st = c.settings
         val hs = c.mode.highSpeed
-        expoBtn.text = when (st.exposure) { Exposure.AUTO -> "Expo auto"; Exposure.LOCK -> "Expo verrou"; Exposure.MANUAL -> "Expo manuelle" }
+        expoBtn.text = when (st.exposure) { Exposure.AUTO -> "Auto"; Exposure.LOCK -> "Verrou"; Exposure.MANUAL -> "Manuel" }
         expoBtn.selected(st.exposure != Exposure.AUTO)
-        focusBtn.text = if (c.lens.fixedFocus) "MAP fixe" else if (st.manualFocus) "MAP manuelle" else "MAP auto"
+        focusBtn.text = if (c.lens.fixedFocus) "Fixe" else if (st.manualFocus) "Manuel" else "AF"
         focusBtn.selected(st.manualFocus); focusBtn.isEnabled = !c.lens.fixedFocus && !hs
         wbBtn.text = wbModes[wbIndex].first; wbBtn.selected(wbIndex != 0)
-        eisBtn.text = if (st.eis) "Stab. ON" else "Stab. OFF (Gyroflow)"; eisBtn.selected(!st.eis)
+        eisBtn.text = if (st.eis) "Stab." else "Stab. off"; eisBtn.selected(!st.eis)
         rateBtn.text = "${st.bitrateMbps} Mb/s"
-        gyroBtn.text = if (st.gyroLog) "Gyro ON" else "Gyro OFF"; gyroBtn.selected(st.gyroLog)
+        gyroBtn.text = "Gyro"; gyroBtn.selected(st.gyroLog)
         listOf(expoBtn, wbBtn, eisBtn).forEach { it.isEnabled = !hs }
 
         val manual = st.exposure == Exposure.MANUAL && !hs
@@ -482,7 +551,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private fun setRecordingUi(on: Boolean) {
         if (!::recordBtn.isInitialized) return
         recordBtn.isEnabled = true
-        recordBtn.text = if (on) "■" else "●"
+        styleShutter()
         for (i in 0 until lensRow.childCount) lensRow.getChildAt(i).isEnabled = !on
         for (i in 0 until modeRow.childCount) modeRow.getChildAt(i).isEnabled = !on
         rateBtn.isEnabled = !on; gyroBtn.isEnabled = !on
