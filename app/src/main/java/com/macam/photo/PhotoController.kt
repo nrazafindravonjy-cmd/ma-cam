@@ -65,7 +65,11 @@ class PhotoController(
     /** Zone de mise au point/exposition choisie au toucher (null = automatique). */
     private var meteringRegion: Array<android.hardware.camera2.params.MeteringRectangle>? = null
 
-    lateinit var profile: DeviceProfile; private set
+    /**
+     * Profil de l'appareil. Créé dès la construction : l'interface le lit avant que la caméra soit ouverte
+     * (en arrière-plan). Corrige le plantage « lateinit property profile has not been initialized » (v0.11).
+     */
+    @Volatile var profile: DeviceProfile = DeviceProfile(ctx, lens.chars); private set
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var extSession: CameraExtensionSession? = null
