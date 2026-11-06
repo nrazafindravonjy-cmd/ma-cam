@@ -2,6 +2,19 @@
 
 Application caméra Android qui améliore la photo et la vidéo par traitement logiciel.
 
+## Atelier vidéo (v0.10)
+
+Post-traitement sur le téléphone (`app/src/main/java/com/macam/studio/`) : décodage, trois passes GPU
+(OpenGL ES 3), réencodage HEVC, son recopié sans perte.
+
+- **Stabilisation gyroscopique** (principe de Gyroflow) : intégration du journal `.gcsv`, lissage aller-retour
+  sans déphasage, limitation à la marge de recadrage, homographie par image interpolée entre le haut et le bas
+  de l'image (correction de l'obturateur roulant) ;
+- **débruitage temporel** récursif, adaptatif au mouvement ;
+- **looks** : LUT 3D `.cube` importées ou intégrées (Film chaud, Cinéma, Log → standard).
+
+Accès : bouton « Atelier » des aides au tournage, ou appui long sur la vignette d'une vidéo.
+
 ## Photo multi-images (v0.5)
 
 Le moteur natif `app/src/main/cpp/engine.cpp` réimplémente les publications de Google (aucun code GCam) :

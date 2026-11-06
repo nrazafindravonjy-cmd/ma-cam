@@ -309,7 +309,8 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         peakBtn = chip("Peaking", R.drawable.ic_peaking) { cam?.let { it.tools.peaking = !it.tools.peaking; it.applySettings() }; refreshButtons() }
         falseBtn = chip("Couleurs", R.drawable.ic_falsecolor) { cam?.let { it.tools.falseColor = !it.tools.falseColor; it.applySettings() }; refreshButtons() }
         flatBtn = chip("Profil Log", R.drawable.ic_flat) { cam?.let { it.settings.flat = !it.settings.flat; it.applySettings() }; refreshButtons() }
-        toolsRow = row().apply { listOf(zebraBtn, peakBtn, falseBtn, flatBtn, gyroBtn).forEach { addView(it) } }
+        val studioBtn = chip("Atelier", R.drawable.ic_studio) { openStudio(null) }
+        toolsRow = row().apply { listOf(studioBtn, zebraBtn, peakBtn, falseBtn, flatBtn, gyroBtn).forEach { addView(it) } }
         dngBtn = chip("RAW", R.drawable.ic_raw) { photo?.let { it.saveDng = !it.saveDng }; refreshButtons() }
         photoRow = row().apply {
             gravity = Gravity.CENTER_HORIZONTAL
@@ -363,6 +364,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             }
             contentDescription = "Dernière capture"; tooltipText = "Ouvrir la dernière capture"
             setOnClickListener { openLastCapture() }
+            setOnLongClickListener { openStudio(thumbUri?.takeIf { it.toString().contains("video") }); true }
         }
         focusRing = View(this).apply {
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setStroke(2.dp, accent) }
@@ -580,6 +582,13 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         }
         android.graphics.Canvas(out).drawCircle(n / 2f, n / 2f, n / 2f, p)
         return out
+    }
+
+    /** Atelier : stabilisation, débruitage et looks après le tournage. */
+    private fun openStudio(video: android.net.Uri?) {
+        startActivity(Intent(this, com.macam.studio.StudioActivity::class.java).apply {
+            data = video; addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        })
     }
 
     private fun openLastCapture() {

@@ -386,6 +386,15 @@ class CameraController(
         val realtime = lens.realtimeClock
         val readoutMs = (lastInfo?.readoutNs ?: 0L) / 1e6
         val lensInfo = "%.0fmm".format(Locale.US, lens.eqMm)
+        val optics = run {
+            val c = lens.chars
+            val phys = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)!!
+            val px = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)!!
+            val active = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            val fPx = lens.focalMm / (phys.width / px.width)
+            "f=%.1f aw=%d o=%d front=%d".format(Locale.US, fPx, active?.width() ?: px.width,
+                c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90, if (lens.front) 1 else 0)
+        }
         // Finalisation hors du fil caméra : l'aperçu ne gèle pas pendant l'écriture du fichier.
         Thread {
             val msg = StringBuilder()
@@ -396,7 +405,7 @@ class CameraController(
                 var zero = r.firstVideoTimestampNs
                 // Ramène l'horodatage vidéo dans l'horloge des capteurs (elapsedRealtime).
                 if (!realtime) zero += SystemClock.elapsedRealtimeNanos() - System.nanoTime()
-                val n = runCatching { gyro.stopAndSave(r.baseName, zero, readoutMs, lensInfo) }.getOrDefault(0)
+                val n = runCatching { gyro.stopAndSave(r.baseName, zero, readoutMs, lensInfo, optics) }.getOrDefault(0)
                 msg.append("\nGyroscope : Download/MaCam/${r.baseName}.gcsv ($n mesures)")
             }
             done(msg.toString())

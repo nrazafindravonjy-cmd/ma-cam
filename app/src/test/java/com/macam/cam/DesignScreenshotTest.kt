@@ -40,5 +40,15 @@ class DesignScreenshotTest {
     @Test fun photo() = shoot(Tab.PHOTO, "scene_day.jpg", "HDR+", "1_photo.png")
     @Test fun night() = shoot(Tab.NIGHT, "scene_city.jpg", "Nuit · ne bougez pas · 3 s", "2_nuit.png")
     @Test fun video() = shoot(Tab.VIDEO, "scene_day.jpg", "4K30 HDR   ISO 100 · 1/60 · ∞", "3_video.png")
+    @Test fun studio() {
+        val act = Robolectric.buildActivity(com.macam.studio.StudioActivity::class.java).setup().get()
+        val root = act.window.decorView
+        val w = 393 * 3; val h = 852 * 3
+        root.measure(android.view.View.MeasureSpec.makeMeasureSpec(w, android.view.View.MeasureSpec.EXACTLY),
+            android.view.View.MeasureSpec.makeMeasureSpec(h, android.view.View.MeasureSpec.EXACTLY))
+        root.layout(0, 0, w, h)
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888); root.draw(Canvas(bmp))
+        File(File("build/design").apply { mkdirs() }, "5_atelier.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
     @Test fun portrait() = shoot(Tab.PORTRAIT, "scene_city.jpg", "Portrait (traitement du fabricant)", "4_portrait.png")
 }

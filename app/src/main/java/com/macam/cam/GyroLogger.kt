@@ -51,13 +51,14 @@ class GyroLogger(private val ctx: Context) : SensorEventListener {
      * Arrête la capture et écrit Download/MaCam/<baseName>.gcsv.
      * [zeroNs] = horodatage de la première image vidéo ; [readoutMs] = temps de lecture du capteur.
      */
-    fun stopAndSave(baseName: String, zeroNs: Long, readoutMs: Double, lensInfo: String): Int {
+    fun stopAndSave(baseName: String, zeroNs: Long, readoutMs: Double, lensInfo: String, optics: String = ""): Int {
         running = false
         sm.unregisterListener(this)
         val sb = StringBuilder(times.size * 80 + 512)
         sb.append("GYROFLOW IMU LOG\nversion,1.3\nid,macam_android\n")
         // Axes du téléphone (Android) : X vers la droite, Y vers le haut, Z vers l'écran.
-        sb.append("orientation,XYZ\nnote,Ma Cam\nvendor,Xiaomi\n")
+        // La note porte les données optiques utilisées par l'Atelier (focale en pixels, orientation du capteur).
+        sb.append("orientation,XYZ\nnote,Ma Cam $optics\nvendor,${android.os.Build.MANUFACTURER}\n")
         sb.append("videofilename,$baseName.mp4\nlens_info,$lensInfo\n")
         sb.append("frame_readout_time,%.3f\nframe_readout_direction,0\n".format(Locale.US, readoutMs))
         sb.append("tscale,0.001\ngscale,1.0\nascale,%.8f\n".format(Locale.US, 1.0 / SensorManager.GRAVITY_EARTH))
