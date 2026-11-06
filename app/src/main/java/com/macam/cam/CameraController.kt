@@ -100,6 +100,8 @@ data class Settings(
     var eis: Boolean = true,
     var bitrateMbps: Int = 100,
     var gyroLog: Boolean = true,
+    /** Zoom numérique (pincement), 1 = aucun. */
+    var zoom: Float = 1f,
     /** Courbe plate type « log » (modes SDR uniquement). */
     var flat: Boolean = false,
 )
@@ -144,6 +146,30 @@ class CameraController(
     private var lastInfoPost = 0L
 
     val recording get() = recorder != null
+    /** Dernière vidéo enregistrée (vignette de la galerie). */
+    @Volatile var lastSaved: android.net.Uri? = null; private set
+    private var meteringRegion: Array<android.hardware.camera2.params.MeteringRectangle>? = null
+
+    /** Plage de zoom de l'objectif courant. */
+    val zoomRange: Range<Float> get() = (if (Build.VERSION.SDK_INT >= 30) lens.chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) else null)
+        ?: Range(1f, 1f)
+
+    /** Toucher pour faire la mise au point et l'exposition (coordonnées capteur normalisées). */
+    fun focusAt(u: Float, v: Float) = handler.post {
+        meteringRegion = Metering.region(lens.chars, u, v)
+        if (settings.manualFocus) return@post applySettingsInternal()
+        val s = session; val d = device
+        if (s != null && d != null && !mode.highSpeed && !lens.fixedFocus) runCatching {
+            val t = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                addTarget(preview!!)
+                meteringRegion?.let { set(CaptureRequest.CONTROL_AF_REGIONS, it); set(CaptureRequest.CONTROL_AE_REGIONS, it) }
+                set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+            }
+            s.capture(t.build(), null, handler)
+        }
+        applySettingsInternal()
+    }
 
     // ---------------------------------------------------------------- ouverture
 
@@ -170,6 +196,7 @@ class CameraController(
         mode = if (l.supports(m)) m else Mode.entries.firstOrNull { l.supports(it) }
             ?: return onError("Aucun mode vidéo compatible avec cet objectif")
         settings.manualFocus = settings.manualFocus && !l.fixedFocus
+        settings.zoom = 1f; meteringRegion = null
         analysisAllowed = true
         openWithFallback(l.id, l.parentId)
     }
@@ -264,6 +291,12 @@ class CameraController(
         targets.forEach { b.addTarget(it) }
         b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(mode.fps, mode.fps))
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+        if (Build.VERSION.SDK_INT >= 30 && st.zoom > 1f && !mode.highSpeed)
+            b.set(CaptureRequest.CONTROL_ZOOM_RATIO, st.zoom.coerceIn(zoomRange.lower, zoomRange.upper))
+        if (!mode.highSpeed) meteringRegion?.let { r ->
+            if ((lens.chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0) b.set(CaptureRequest.CONTROL_AF_REGIONS, r)
+            if ((lens.chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0) > 0) b.set(CaptureRequest.CONTROL_AE_REGIONS, r)
+        }
 
         if (!mode.highSpeed) {
             b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
@@ -357,6 +390,7 @@ class CameraController(
         Thread {
             val msg = StringBuilder()
             val uri = r.finish()
+            if (uri != null) lastSaved = uri
             msg.append(if (uri != null) "Vidéo enregistrée : DCIM/MaCam/${r.baseName}.mp4" else "Échec : aucune image enregistrée")
             if (withGyro) {
                 var zero = r.firstVideoTimestampNs

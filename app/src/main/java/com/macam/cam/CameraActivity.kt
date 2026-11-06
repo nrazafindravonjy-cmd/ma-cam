@@ -90,7 +90,9 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private val orientationListener by lazy {
         object : OrientationEventListener(this) {
             override fun onOrientationChanged(o: Int) {
-                if (o != ORIENTATION_UNKNOWN) deviceOrientation = ((o + 45) / 90 * 90) % 360
+                if (o == ORIENTATION_UNKNOWN) return
+                val d = ((o + 45) / 90 * 90) % 360
+                if (d != deviceOrientation) { deviceOrientation = d; rotateIcons(d) }
             }
         }
     }
@@ -99,7 +101,11 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         installCrashLog()
+        // Mémoire : on rouvre le dernier mode et l'état du panneau de réglages.
+        tab = runCatching { Tab.valueOf(prefs.getString("tab", "PHOTO")!!) }.getOrDefault(Tab.PHOTO)
+        settingsOpen = prefs.getBoolean("settingsOpen", false)
         buildUi()
+        loadLatestThumbnail()
         showPreviousCrash()
     }
 
@@ -154,6 +160,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             photo = PhotoController(this, ::awaitPreviewSurface,
                 onStatus = { t -> runOnUiThread { info.text = t; refreshButtons() } },
                 onError = toast)
+            photo!!.onSaved = { uri -> runOnUiThread { showThumbnail(uri) } }
             photo!!.start(m = mode)
             showOverlay(null)
         }
@@ -167,6 +174,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         cam?.release(); cam = null
         photo?.release(); photo = null
         tab = t
+        prefs.edit().putString("tab", t.name).apply()
         startCamera()
     }
 
@@ -234,6 +242,14 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private var settingsOpen = false
     private lateinit var gearBtn: Button
     private lateinit var panelGlass: GlassView
+    private lateinit var infoGlass: GlassView
+    private lateinit var thumb: ImageView
+    private lateinit var focusRing: View
+    private lateinit var flash: View
+    private var thumbUri: android.net.Uri? = null
+    private var busyPulse: android.animation.ObjectAnimator? = null
+    private var iconRotation = 0f
+    private val prefs by lazy { getSharedPreferences("macam", MODE_PRIVATE) }
     private val blurHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /** Panneau translucide : voile clair + liseré lumineux, comme une plaque de verre sur l'aperçu. */
@@ -301,7 +317,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
 
         recordBtn = Button(this).apply {
             text = ""; contentDescription = "Déclencheur"
-            setOnClickListener { if (tab == Tab.VIDEO) toggleRecording() else photo?.capture(deviceOrientation) }
+            setOnClickListener { shutter() }
         }
         styleShutter()
         overlay = ImageView(this).apply { scaleType = ImageView.ScaleType.MATRIX }
@@ -311,11 +327,30 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             val d = getDrawable(R.drawable.ic_tune)!!.mutate().apply { setBounds(0, 0, 22.dp, 22.dp) }
             setCompoundDrawablesRelative(d, null, null, null); setPadding(11.dp, 0, 0, 0)
             background = glass(23)
-            setOnClickListener { settingsOpen = !settingsOpen; refreshButtons() }
+            setOnClickListener {
+                settingsOpen = !settingsOpen
+                prefs.edit().putBoolean("settingsOpen", settingsOpen).apply()
+                refreshButtons()
+            }
         }
+        // Vignette de la dernière capture (convention des applis photo) : un toucher l'ouvre.
+        thumb = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = glass(23); clipToOutline = true
+            outlineProvider = object : android.view.ViewOutlineProvider() {
+                override fun getOutline(v: View, o: android.graphics.Outline) { o.setOval(0, 0, v.width, v.height) }
+            }
+            contentDescription = "Dernière capture"; tooltipText = "Ouvrir la dernière capture"
+            setOnClickListener { openLastCapture() }
+        }
+        focusRing = View(this).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setStroke(2.dp, accent) }
+            alpha = 0f; isClickable = false
+        }
+        flash = View(this).apply { setBackgroundColor(Color.WHITE); alpha = 0f; isClickable = false }
         val shutterRow = LinearLayout(this).apply {
             gravity = Gravity.CENTER
-            addView(View(this@CameraActivity), LinearLayout.LayoutParams(46.dp, 46.dp))
+            addView(thumb, LinearLayout.LayoutParams(46.dp, 46.dp))
             addView(recordBtn, LinearLayout.LayoutParams(76.dp, 76.dp).apply { setMargins(36.dp, 0, 36.dp, 0) })
             addView(gearBtn, LinearLayout.LayoutParams(46.dp, 46.dp))
         }
@@ -331,14 +366,17 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             addView(tabRow, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL })
         }
         panelGlass = GlassView(this, 30.dp.toFloat()).apply { addView(content) }
-        val infoGlass = GlassView(this, 19.dp.toFloat(), tint = 0x40101418).apply { elevation = 4.dp.toFloat(); addView(info) }
+        infoGlass = GlassView(this, 19.dp.toFloat(), tint = 0x40101418).apply { elevation = 4.dp.toFloat(); addView(info) }
         Backdrop.source = surfaceView
+        installGestures()
 
         setContentView(FrameLayout(this).apply {
             fitsSystemWindows = true
             setBackgroundColor(0xFF050607.toInt())
             addView(surfaceView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
             addView(this@CameraActivity.overlay, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
+            addView(flash, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(focusRing, FrameLayout.LayoutParams(72.dp, 72.dp))
             addView(infoGlass, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = 12.dp })
             addView(panelGlass, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(10.dp, 0, 10.dp, 10.dp) })
         })
@@ -366,6 +404,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             drawBitmap(scene, 0f, 0f, android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
         }
         Backdrop.update(small)
+        thumb.setImageBitmap(circle(small))
         info.text = status
         for (i in 0 until tabRow.childCount) (tabRow.getChildAt(i) as Button).selected(Tab.entries[i] == t)
         lensRow.removeAllViews(); modeRow.removeAllViews()
@@ -383,6 +422,132 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         listOf(eisBtn, gyroBtn, zebraBtn).forEach { it.selected(true) }
         evBar.progress = 0
         for (i in 0 until manualPanel.childCount) manualPanel.getChildAt(i).visibility = if (i < 2) View.VISIBLE else View.GONE
+    }
+
+    // ------------------------------------------------------------------ gestes et retours (UX)
+
+    /** Déclenchement unique (bouton ou touches de volume), avec vibration et flash de confirmation. */
+    private fun shutter() {
+        if (!recordBtn.isEnabled) return
+        recordBtn.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
+        if (tab == Tab.VIDEO) toggleRecording()
+        else photo?.let { p ->
+            if (p.busy) return
+            flash.animate().cancel()
+            flash.alpha = 0.55f
+            flash.animate().alpha(0f).setDuration(220).start()
+            p.capture(deviceOrientation)
+        }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if ((keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP || keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN ||
+                keyCode == android.view.KeyEvent.KEYCODE_CAMERA) && event.repeatCount == 0) { shutter(); return true }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    /** Toucher = mise au point ; pincer = zoom (vidéo) ; balayer = changer de mode. */
+    private fun installGestures() {
+        val tap = android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: android.view.MotionEvent) = true
+            override fun onSingleTapUp(e: android.view.MotionEvent): Boolean { focusAt(e.x, e.y); return true }
+            override fun onFling(e1: android.view.MotionEvent?, e2: android.view.MotionEvent, vx: Float, vy: Float): Boolean {
+                if (kotlin.math.abs(vx) < 2 * kotlin.math.abs(vy) || kotlin.math.abs(vx) < 800) return false
+                val i = Tab.entries.indexOf(tab) + if (vx < 0) 1 else -1
+                if (i in Tab.entries.indices) switchTab(Tab.entries[i])
+                return true
+            }
+        })
+        val pinch = android.view.ScaleGestureDetector(this, object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(d: android.view.ScaleGestureDetector): Boolean {
+                val c = cam ?: return false
+                val r = c.zoomRange
+                c.settings.zoom = (c.settings.zoom * d.scaleFactor).coerceIn(maxOf(1f, r.lower), r.upper)
+                c.applySettings()
+                info.text = "Zoom ×%.1f".format(Locale.US, c.settings.zoom)
+                return true
+            }
+        })
+        overlay.setOnTouchListener { _, e -> pinch.onTouchEvent(e); if (!pinch.isInProgress) tap.onTouchEvent(e); true }
+    }
+
+    private fun focusAt(x: Float, y: Float) {
+        val v = overlay
+        if (v.width == 0) return
+        val lens = cam?.lens ?: photo?.lens ?: return
+        val sensor = lens.chars.get(android.hardware.camera2.CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        val (u, w) = Metering.viewToSensor(x / v.width, y / v.height, sensor, lens.front)
+        cam?.focusAt(u, w); photo?.focusAt(u, w)
+        // Anneau de mise au point animé à l'endroit touché.
+        focusRing.animate().cancel()
+        focusRing.x = v.x + x - 36.dp; focusRing.y = v.y + y - 36.dp
+        focusRing.scaleX = 1.4f; focusRing.scaleY = 1.4f; focusRing.alpha = 1f
+        focusRing.animate().scaleX(1f).scaleY(1f).setDuration(180).withEndAction {
+            focusRing.animate().alpha(0f).setStartDelay(900).setDuration(300).start()
+        }.start()
+    }
+
+    /** Pulsation du déclencheur pendant le traitement multi-images (l'appli travaille). */
+    private fun setBusy(on: Boolean) {
+        if (on && busyPulse == null) {
+            busyPulse = android.animation.ObjectAnimator.ofFloat(recordBtn, "alpha", 1f, 0.35f).apply {
+                duration = 600; repeatMode = android.animation.ValueAnimator.REVERSE
+                repeatCount = android.animation.ValueAnimator.INFINITE; start()
+            }
+        } else if (!on && busyPulse != null) { busyPulse?.cancel(); busyPulse = null; recordBtn.alpha = 1f }
+    }
+
+    /** L'interface reste en portrait ; les icônes pivotent pour rester lisibles téléphone tourné. */
+    private fun rotateIcons(deg: Int) {
+        val target = -(if (deg == 270) -90 else deg).toFloat()
+        iconRotation = target
+        val views = mutableListOf<View>(gearBtn, thumb)
+        for (i in 0 until lensRow.childCount) views += lensRow.getChildAt(i)
+        views.forEach { it.animate().rotation(target).setDuration(250).start() }
+    }
+
+    private fun showThumbnail(uri: android.net.Uri) {
+        thumbUri = uri
+        Thread {
+            val bmp = runCatching { contentResolver.loadThumbnail(uri, Size(160, 160), null) }.getOrNull()
+            runOnUiThread { if (bmp != null) { thumb.setImageBitmap(circle(bmp)); thumb.scaleX = 0.6f; thumb.scaleY = 0.6f
+                thumb.animate().scaleX(1f).scaleY(1f).setDuration(220).start() } }
+        }.start()
+    }
+
+    /** Au lancement : vignette de la dernière photo ou vidéo de Ma Cam. */
+    private fun loadLatestThumbnail() = Thread {
+        val found = listOf(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI).mapNotNull { base ->
+            runCatching {
+                contentResolver.query(base, arrayOf(android.provider.MediaStore.MediaColumns._ID, android.provider.MediaStore.MediaColumns.DATE_ADDED),
+                    "${android.provider.MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?", arrayOf("DCIM/MaCam%"),
+                    "${android.provider.MediaStore.MediaColumns.DATE_ADDED} DESC")?.use { c ->
+                    if (c.moveToFirst()) android.content.ContentUris.withAppendedId(base, c.getLong(0)) to c.getLong(1) else null
+                }
+            }.getOrNull()
+        }.maxByOrNull { it.second }
+        found?.let { runOnUiThread { showThumbnail(it.first) } }
+    }.start()
+
+    /** Recadrage circulaire dans l'image elle-même (rond sur tous les appareils). */
+    private fun circle(src: android.graphics.Bitmap): android.graphics.Bitmap {
+        val n = minOf(src.width, src.height)
+        val out = android.graphics.Bitmap.createBitmap(n, n, android.graphics.Bitmap.Config.ARGB_8888)
+        val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG).apply {
+            shader = android.graphics.BitmapShader(src, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP).apply {
+                setLocalMatrix(android.graphics.Matrix().apply { setTranslate(-(src.width - n) / 2f, -(src.height - n) / 2f) })
+            }
+        }
+        android.graphics.Canvas(out).drawCircle(n / 2f, n / 2f, n / 2f, p)
+        return out
+    }
+
+    private fun openLastCapture() {
+        val u = thumbUri ?: return Toast.makeText(this, "Aucune capture pour l'instant", Toast.LENGTH_SHORT).show()
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, u).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        }.onFailure { Toast.makeText(this, "Aucune application pour ouvrir ce fichier", Toast.LENGTH_SHORT).show() }
     }
 
     /** Déclencheur dessiné : anneau blanc + disque (photo), disque rouge (vidéo), carré rouge (enregistrement). */
@@ -430,8 +595,10 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             setCompoundDrawablesRelative(d, null, null, null)
             compoundDrawablePadding = 6.dp
         }
-        layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, 36.dp).apply { setMargins(4.dp, 0, 4.dp, 0) }
-        setOnClickListener { onClick() }
+        // Cible tactile ≥ 40 dp (+ marges = 48 dp), info-bulle à l'appui long, description pour TalkBack.
+        layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, 40.dp).apply { setMargins(4.dp, 4.dp, 4.dp, 4.dp) }
+        tooltipText = label; contentDescription = label
+        setOnClickListener { performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); onClick() }
     }
 
     private fun Button.selected(on: Boolean) {
@@ -494,8 +661,9 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     /** Pastille ronde pour le choix d'objectif (0.6x, 1x, 5x…). */
     private fun lensChip(label: String, onClick: () -> Unit) = chip(label, null, onClick).apply {
         setPadding(0, 0, 0, 0); textSize = 11f
-        layoutParams = LinearLayout.LayoutParams(40.dp, 40.dp).apply { setMargins(5.dp, 0, 5.dp, 0) }
-        background = glass(20)
+        layoutParams = LinearLayout.LayoutParams(44.dp, 44.dp).apply { setMargins(5.dp, 2.dp, 5.dp, 2.dp) }
+        background = glass(22)
+        rotation = iconRotation
     }
 
     private fun photoRefresh() { photo?.handler?.post { runOnUiThread { refreshRows(); refreshButtons() } } }
@@ -516,7 +684,11 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         photo?.let { p ->
             dngBtn.selected(p.saveDng); dngBtn.isEnabled = p.mode != PhotoMode.PORTRAIT
             recordBtn.isEnabled = !p.busy
+            setBusy(p.busy)
         }
+        if (photo == null) setBusy(false)
+        // Enregistrement : l'info devient rouge, visible d'un coup d'œil.
+        infoGlass.tint = if (cam?.recording == true) 0xB3C62828.toInt() else 0x40101418
         val c = cam ?: return
         zebraBtn.selected(c.tools.zebra); peakBtn.selected(c.tools.peaking); falseBtn.selected(c.tools.falseColor)
         flatBtn.selected(c.settings.flat); flatBtn.isEnabled = !c.mode.tenBit && !c.mode.highSpeed
@@ -608,7 +780,10 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             val hint = if (back) (sensor + deviceOrientation) % 360 else (sensor - deviceOrientation + 360) % 360
             c.startRecording(hint) { ok -> runOnUiThread { if (ok) recordStart = SystemClock.elapsedRealtime(); setRecordingUi(ok) } }
         } else {
-            c.stopRecording { msg -> runOnUiThread { setRecordingUi(false); Toast.makeText(this, msg, Toast.LENGTH_LONG).show() } }
+            c.stopRecording { msg -> runOnUiThread {
+                setRecordingUi(false); Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                c.lastSaved?.let { showThumbnail(it) }
+            } }
         }
     }
 

@@ -74,7 +74,11 @@ object Backdrop {
  * Panneau de verre dépoli : flou réel de l'aperçu situé derrière, voile teinté, reflet diagonal
  * et liseré lumineux plus marqué sur le bord supérieur.
  */
-class GlassView(ctx: Context, private val radiusPx: Float, private val tint: Int = 0x52101418) : FrameLayout(ctx) {
+class GlassView(ctx: Context, private val radiusPx: Float, tint: Int = 0x52101418) : FrameLayout(ctx) {
+
+    /** Teinte du verre (modifiable, ex. rouge pendant l'enregistrement). */
+    var tint: Int = tint
+        set(value) { field = value; tintPaint.color = value; invalidate() }
 
     private val path = Path()
     private val rect = RectF()

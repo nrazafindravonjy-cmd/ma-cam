@@ -21,6 +21,7 @@ import android.util.Range
 import android.util.Size
 import android.view.Surface
 import com.macam.cam.Lens
+import com.macam.cam.Metering
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.text.SimpleDateFormat
@@ -59,6 +60,10 @@ class PhotoController(
     var superRes = false; private set
     var saveDng = false
     @Volatile var busy = false; private set
+    /** Appelée avec l'URI de chaque photo enregistrée (vignette de la galerie). */
+    var onSaved: (android.net.Uri) -> Unit = {}
+    /** Zone de mise au point/exposition choisie au toucher (null = automatique). */
+    private var meteringRegion: Array<android.hardware.camera2.params.MeteringRectangle>? = null
 
     lateinit var profile: DeviceProfile; private set
     private var device: CameraDevice? = null
@@ -165,7 +170,25 @@ class PhotoController(
             if (!lens.fixedFocus) set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             if (lens.hasOis) set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
             if (superRes && Build.VERSION.SDK_INT >= 30) set(CaptureRequest.CONTROL_ZOOM_RATIO, 2f)
+            meteringRegion?.let { r ->
+                if ((lens.chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0) set(CaptureRequest.CONTROL_AF_REGIONS, r)
+                if ((lens.chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0) > 0) set(CaptureRequest.CONTROL_AE_REGIONS, r)
+            }
         }
+
+    /** Toucher pour faire la mise au point et l'exposition en (u, v), coordonnées capteur normalisées [0, 1]. */
+    fun focusAt(u: Float, v: Float) = handler.post {
+        val s = session ?: return@post; val d = device ?: return@post
+        meteringRegion = Metering.region(lens.chars, u, v)
+        try {
+            val trigger = previewRequest(d).apply {
+                if (!lens.fixedFocus) set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+                set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+            }
+            s.capture(trigger.build(), null, handler)
+            startPreview()
+        } catch (_: Exception) {}
+    }
 
     private fun startPreview() {
         val s = session ?: return; val d = device ?: return
@@ -384,7 +407,7 @@ class PhotoController(
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         if (!engine.render(bmp, wb, ccm, look)) throw IllegalStateException("rendu refusé")
         val frames = engine.frames
-        Saver.saveJpeg(ctx, bmp, rotation, name, p.iso.takeIf { it > 0 }, p.exposureNs.takeIf { it > 0 }, frames)
+        onSaved(Saver.saveJpeg(ctx, bmp, rotation, name, p.iso.takeIf { it > 0 }, p.exposureNs.takeIf { it > 0 }, frames))
         bmp.recycle()
         rawBuf?.let { Saver.saveDng(ctx, lens.chars, result, it, Size(w, h), rotation, name) }
         onStatus("Enregistrée : DCIM/MaCam/$name.jpg ($frames images${if (rawBuf != null) " + DNG" else ""})")
@@ -432,7 +455,7 @@ class PhotoController(
             val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
             img.close()
             worker.execute {
-                try { Saver.saveJpegBytes(ctx, bytes, name); onStatus("Enregistrée : DCIM/MaCam/$name.jpg") }
+                try { onSaved(Saver.saveJpegBytes(ctx, bytes, name)); onStatus("Enregistrée : DCIM/MaCam/$name.jpg") }
                 catch (e: Exception) { onError("Enregistrement impossible : ${e.message}") }
                 finally { busy = false }
             }

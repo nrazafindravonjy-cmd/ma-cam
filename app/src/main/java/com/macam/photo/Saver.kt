@@ -23,7 +23,7 @@ object Saver {
         else -> ExifInterface.ORIENTATION_NORMAL
     }
 
-    private fun insert(ctx: Context, name: String, mime: String, write: (java.io.OutputStream) -> Unit) {
+    private fun insert(ctx: Context, name: String, mime: String, write: (java.io.OutputStream) -> Unit): android.net.Uri {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, mime)
@@ -35,13 +35,14 @@ object Saver {
         try {
             ctx.contentResolver.openOutputStream(uri)!!.use(write)
             ctx.contentResolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
+            return uri
         } catch (e: Exception) {
             ctx.contentResolver.delete(uri, null, null); throw e
         }
     }
 
     /** JPEG qualité 95 avec orientation et métadonnées EXIF. */
-    fun saveJpeg(ctx: Context, bmp: Bitmap, rotation: Int, name: String, iso: Int?, exposureNs: Long?, frames: Int) {
+    fun saveJpeg(ctx: Context, bmp: Bitmap, rotation: Int, name: String, iso: Int?, exposureNs: Long?, frames: Int): android.net.Uri {
         val tmp = File(ctx.cacheDir, "$name.jpg")
         tmp.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
         ExifInterface(tmp.absolutePath).apply {
@@ -55,7 +56,7 @@ object Saver {
             exposureNs?.let { setAttribute(ExifInterface.TAG_EXPOSURE_TIME, (it / 1e9).toString()) }
             saveAttributes()
         }
-        try { insert(ctx, "$name.jpg", "image/jpeg") { out -> tmp.inputStream().use { it.copyTo(out) } } }
+        return try { insert(ctx, "$name.jpg", "image/jpeg") { out -> tmp.inputStream().use { it.copyTo(out) } } }
         finally { tmp.delete() }
     }
 
