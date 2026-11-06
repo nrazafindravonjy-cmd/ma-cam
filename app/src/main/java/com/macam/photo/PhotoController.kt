@@ -80,16 +80,24 @@ class PhotoController(
 
     fun start(l: Lens = lens, m: PhotoMode = mode, sr: Boolean = superRes) = handler.post { reopen(l, m, sr) }
 
-    fun release() = handler.post {
+    /** Ferme tout, attend que la caméra soit réellement libérée, puis appelle [done]. */
+    fun release(done: () -> Unit = {}) = handler.post {
         // Une photo en cours de traitement est terminée avec les images déjà reçues, pas perdue.
         currentJob?.let { j -> worker.execute { j.forceComplete() } }
-        close(); motion.stop(); worker.shutdown(); thread.quitSafely()
+        close(); motion.stop()
+        closed?.await(1500, TimeUnit.MILLISECONDS)
+        done()
+        worker.shutdown(); thread.quitSafely()
     }
+
+    @Volatile private var closed: CountDownLatch? = null
+    private var configureAttempt = 0
 
     private fun close() {
         runCatching { session?.close() }; session = null
         runCatching { extSession?.close() }; extSession = null
-        runCatching { device?.close() }; device = null
+        device?.let { closed = CountDownLatch(1); runCatching { it.close() } }
+        device = null
         runCatching { reader?.close() }; reader = null
     }
 
@@ -107,8 +115,9 @@ class PhotoController(
 
     /** Repli sur la caméra logique si l'objectif physique ne peut pas être ouvert directement. */
     @SuppressLint("MissingPermission")
-    private fun open(id: String, parent: String, m: PhotoMode) {
-        val retry = { if (id != parent) open(parent, parent, m) else onError("Ouverture impossible") }
+    private fun open(id: String, parent: String, m: PhotoMode, attempt: Int = 0) {
+        val retry = { if (id != parent) open(parent, parent, m) else onError("Ouverture de la caméra impossible") }
+        val busyRetry = { if (attempt < 5) handler.postDelayed({ open(id, parent, m, attempt + 1) }, 300) else retry() }
         try {
             cm.openCamera(id, executor, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) {
@@ -117,9 +126,18 @@ class PhotoController(
                     catch (e: Exception) { onError("Session impossible : ${e.message}") }
                 }
                 override fun onDisconnected(d: CameraDevice) { d.close() }
-                override fun onError(d: CameraDevice, e: Int) { d.close(); if (device == null) retry() else onError("Erreur caméra $e") }
+                override fun onClosed(d: CameraDevice) { closed?.countDown() }
+                override fun onError(d: CameraDevice, e: Int) {
+                    d.close()
+                    when {
+                        e == ERROR_CAMERA_IN_USE || e == ERROR_MAX_CAMERAS_IN_USE -> busyRetry()
+                        device == null -> retry()
+                        else -> onError("Erreur caméra $e")
+                    }
+                }
             })
-        } catch (e: Exception) { retry() }
+        } catch (e: CameraAccessException) { busyRetry() }
+        catch (e: Exception) { retry() }
     }
 
     private fun logicalId(front: Boolean) = cm.cameraIdList.firstOrNull {
@@ -157,7 +175,11 @@ class PhotoController(
         d.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outs, executor,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) { session = s; startPreview() }
-                override fun onConfigureFailed(s: CameraCaptureSession) { onError("Configuration photo refusée") }
+                override fun onConfigureFailed(s: CameraCaptureSession) {
+                    // Surface d'aperçu encore tenue par la caméra précédente : nouvel essai.
+                    if (configureAttempt++ < 2) handler.postDelayed({ device?.let { runCatching { reader?.close() }; configure(it) } }, 350)
+                    else onError("Configuration photo refusée")
+                }
             }))
         onStatus(statusLine())
     }

@@ -37,6 +37,8 @@ enum class Tab(val label: String) { PHOTO("Photo"), NIGHT("Nuit"), PORTRAIT("Por
 class CameraActivity : Activity(), SurfaceHolder.Callback {
 
     private var tab = Tab.PHOTO
+    private var switching = false
+    private var resumed = false
     private var photo: PhotoController? = null
     private lateinit var overlay: ImageView
     private lateinit var tabRow: LinearLayout
@@ -117,6 +119,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onResume() {
         super.onResume()
+        resumed = true
         blurHandler.postDelayed(blurTick, 300)
         orientationListener.enable()
         val missing = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
@@ -139,6 +142,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun onPause() {
+        resumed = false
         blurHandler.removeCallbacks(blurTick)
         orientationListener.disable()
         cam?.release(); cam = null
@@ -177,15 +181,24 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun switchTab(t: Tab) {
-        if (t == tab || cam?.recording == true || photo?.busy == true) return
-        cam?.release(); cam = null
-        photo?.release(); photo = null
+        if (t == tab || switching || cam?.recording == true || photo?.busy == true) return
+        // On attend que l'ancienne caméra soit réellement fermée avant d'ouvrir la suivante :
+        // les deux partagent la surface d'aperçu, qui ne peut servir qu'à une session à la fois.
+        switching = true
+        val ready = { runOnUiThread { switching = false; if (resumed) startCamera() } }
+        val oldCam = cam; val oldPhoto = photo
+        cam = null; photo = null
+        when {
+            oldCam != null -> oldCam.release(ready)
+            oldPhoto != null -> oldPhoto.release(ready)
+            else -> ready()
+        }
         tab = t
         prefs.edit().putString("tab", t.name).apply()
         // Réponse immédiate (< 400 ms, seuil de Doherty) : un voile masque la réouverture de la caméra.
         curtain.animate().cancel(); curtain.alpha = 1f
-        curtain.animate().alpha(0f).setStartDelay(350).setDuration(300).start()
-        startCamera()
+        curtain.animate().alpha(0f).setStartDelay(450).setDuration(300).start()
+        for (i in 0 until tabRow.childCount) (tabRow.getChildAt(i) as Button).selected(Tab.entries[i] == t)
     }
 
     /** Affiche le calque des outils pro, tourné et mis à l'échelle comme l'aperçu. */

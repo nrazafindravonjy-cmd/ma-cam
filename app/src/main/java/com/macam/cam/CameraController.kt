@@ -181,13 +181,27 @@ class CameraController(
         closeDevice()
     }
 
-    fun release() { stop(); handler.post { gyro.release(); thread.quitSafely() } }
+    /**
+     * Ferme tout puis appelle [done] une fois la caméra réellement libérée (onClosed) : la caméra suivante
+     * ne doit pas s'ouvrir tant que celle-ci tient encore la surface d'aperçu.
+     */
+    fun release(done: () -> Unit = {}) {
+        stop()
+        handler.post {
+            closed?.await(1500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            gyro.release(); done(); thread.quitSafely()
+        }
+    }
+
+    /** Signalé par onClosed quand le pilote a vraiment fermé la caméra. */
+    @Volatile private var closed: java.util.concurrent.CountDownLatch? = null
 
     private fun closeDevice() {
         runCatching { session?.close() }; session = null
         runCatching { analysis?.close() }; analysis = null
         armed?.disarm(); armed = null
-        runCatching { device?.close() }; device = null
+        device?.let { closed = java.util.concurrent.CountDownLatch(1); runCatching { it.close() } }
+        device = null
     }
 
     @SuppressLint("MissingPermission")
@@ -204,16 +218,32 @@ class CameraController(
 
     /** Certains fabricants interdisent d'ouvrir un objectif physique : on se replie sur la caméra logique. */
     @SuppressLint("MissingPermission")
-    private fun openWithFallback(id: String, parent: String) {
-        val retry = { if (id != parent) openWithFallback(parent, parent) else onError("Ouverture impossible") }
+    private fun openWithFallback(id: String, parent: String, attempt: Int = 0) {
+        // Caméra encore occupée (fermeture en cours) : on réessaie le même objectif ; sinon repli sur la logique.
+        val busyRetry = { if (attempt < 5) handler.postDelayed({ openWithFallback(id, parent, attempt + 1) }, 300) else fallback(id, parent) }
         try {
             cm.openCamera(id, executor, object : CameraDevice.StateCallback() {
-                override fun onOpened(d: CameraDevice) { device = d; configure() }
+                override fun onOpened(d: CameraDevice) { device = d; configureAttempt = 0; configure() }
                 override fun onDisconnected(d: CameraDevice) { d.close(); if (device == d) device = null }
-                override fun onError(d: CameraDevice, e: Int) { d.close(); if (device == null) retry() else onError("Erreur caméra $e") }
+                override fun onClosed(d: CameraDevice) { closed?.countDown() }
+                override fun onError(d: CameraDevice, e: Int) {
+                    d.close()
+                    when {
+                        device != null && device != d -> {}
+                        e == ERROR_CAMERA_IN_USE || e == ERROR_MAX_CAMERAS_IN_USE -> busyRetry()
+                        device == null -> fallback(id, parent)
+                        else -> onError("Erreur caméra $e")
+                    }
+                }
             })
-        } catch (e: Exception) { retry() }
+        } catch (e: CameraAccessException) { busyRetry() }
+        catch (e: Exception) { fallback(id, parent) }
     }
+
+    private fun fallback(id: String, parent: String) =
+        if (id != parent) openWithFallback(parent, parent) else onError("Ouverture de la caméra impossible")
+
+    private var configureAttempt = 0
 
     /** (Re)crée la session : aperçu + encodeur préparé pour un démarrage instantané. */
     fun reconfigure() = handler.post { if (!recording) configure() }
@@ -231,7 +261,7 @@ class CameraController(
         } catch (e: Exception) { onError("Encodeur indisponible : ${e.message}"); null }
         armed = rec
         runCatching { analysis?.close() }; analysis = null
-        val an = if (analysisAllowed && !mode.highSpeed) createAnalysisReader() else null
+        val an = if (analysisAllowed && !mode.highSpeed) runCatching { createAnalysisReader() }.getOrNull() else null
         analysis = an
         val outs = listOfNotNull(pv, rec?.inputSurface, an?.surface).map { s ->
             OutputConfiguration(s).apply {
@@ -241,13 +271,18 @@ class CameraController(
         val type = if (mode.highSpeed) SessionConfiguration.SESSION_HIGH_SPEED else SessionConfiguration.SESSION_REGULAR
         if (!pv.isValid) { onError("Aperçu indisponible, réessayez"); return }
         try { dev.createCaptureSession(SessionConfiguration(type, outs, executor, object : CameraCaptureSession.StateCallback() {
-            override fun onConfigured(s: CameraCaptureSession) { session = s; applySettingsInternal() }
+            override fun onConfigured(s: CameraCaptureSession) { session = s; configureAttempt = 0; applySettingsInternal() }
             override fun onConfigureFailed(s: CameraCaptureSession) {
-                if (an != null) { // on réessaie sans le flux d'analyse (outils pro indisponibles)
-                    analysisAllowed = false
-                    onError("Outils pro indisponibles dans ce mode")
-                    configure()
-                } else onError("Configuration refusée pour ${mode.label} sur cet objectif")
+                when {
+                    // La surface d'aperçu peut être encore libérée par la caméra précédente : on réessaie.
+                    configureAttempt < 2 -> { configureAttempt++; handler.postDelayed({ configure() }, 350) }
+                    an != null -> { // dernier recours : sans le flux d'analyse (outils pro indisponibles)
+                        analysisAllowed = false
+                        onError("Outils pro indisponibles dans ce mode")
+                        configure()
+                    }
+                    else -> onError("Configuration refusée pour ${mode.label} sur cet objectif")
+                }
             }
         })) } catch (e: Exception) { onError("Session impossible : ${e.message}") }
     }
