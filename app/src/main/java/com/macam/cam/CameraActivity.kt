@@ -299,6 +299,35 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         layoutPreview(Size(1440, 1080))
     }
 
+    /**
+     * Remplit l'interface avec des valeurs d'exemple, sans caméra, pour produire des captures du design
+     * (utilisé par le test DesignScreenshotTest ; l'image fournie remplace l'aperçu en direct).
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun showDemo(t: Tab, scene: android.graphics.Bitmap, status: String) {
+        tab = t
+        layoutPreview(if (t == Tab.VIDEO) Size(1920, 1080) else Size(1440, 1080))
+        overlay.scaleType = ImageView.ScaleType.CENTER_CROP
+        overlay.setImageBitmap(scene)
+        info.text = status
+        for (i in 0 until tabRow.childCount) (tabRow.getChildAt(i) as Button).selected(Tab.entries[i] == t)
+        lensRow.removeAllViews(); modeRow.removeAllViews()
+        if (t != Tab.PORTRAIT) {
+            for (l in listOf("0.6x", "1x", "5x", "Avant")) {
+                lensRow.addView(lensChip(l) {}.apply { selected(l == "1x") })
+                if (l == "1x" && t == Tab.PHOTO) lensRow.addView(chip("2× SR", R.drawable.ic_zoom) {}.apply { selected(false) })
+            }
+        }
+        if (t == Tab.VIDEO) for (m in Mode.entries.filter { it.size.width == 3840 })
+            modeRow.addView(chip(m.label) {}.apply { selected(m == Mode.UHD30_HLG) })
+        refreshButtons()
+        expoBtn.text = "Auto"; focusBtn.text = "AF"; wbBtn.text = "BdB"; rateBtn.text = "100 Mb/s"
+        listOf(expoBtn, focusBtn, wbBtn, rateBtn, falseBtn, flatBtn, peakBtn, dngBtn).forEach { it.selected(false) }
+        listOf(eisBtn, gyroBtn, zebraBtn).forEach { it.selected(true) }
+        evBar.progress = 0
+        for (i in 0 until manualPanel.childCount) manualPanel.getChildAt(i).visibility = if (i < 2) View.VISIBLE else View.GONE
+    }
+
     /** Déclencheur dessiné : anneau blanc + disque (photo), disque rouge (vidéo), carré rouge (enregistrement). */
     private fun styleShutter() {
         if (!::recordBtn.isInitialized) return
