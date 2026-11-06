@@ -74,6 +74,11 @@ enum class Mode(val label: String, val size: Size, val fps: Int, val tenBit: Boo
     UHD30_SDR("4K30", Size(3840, 2160), 30, false, false),
     UHD60_SDR("4K60", Size(3840, 2160), 60, false, false),
     UHD120("4K120", Size(3840, 2160), 120, false, true),
+    FHD30_HLG("1080p30 HDR", Size(1920, 1080), 30, true, false),
+    FHD60_HLG("1080p60 HDR", Size(1920, 1080), 60, true, false),
+    FHD30_SDR("1080p30", Size(1920, 1080), 30, false, false),
+    FHD60_SDR("1080p60", Size(1920, 1080), 60, false, false),
+    FHD120("1080p120", Size(1920, 1080), 120, false, true),
     FHD240("1080p240", Size(1920, 1080), 240, false, true),
 }
 
@@ -116,6 +121,9 @@ class CameraController(
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var preview: Surface? = null
+    /** Encodeur préparé et intégré à la session, prêt à enregistrer. */
+    private var armed: Recorder? = null
+    /** Enregistrement en cours. */
     private var recorder: Recorder? = null
     private val gyro = GyroLogger(ctx)
     @Volatile var lastInfo: LiveInfo? = null; private set
@@ -136,6 +144,7 @@ class CameraController(
 
     private fun closeDevice() {
         runCatching { session?.close() }; session = null
+        armed?.disarm(); armed = null
         runCatching { device?.close() }; device = null
     }
 
@@ -143,39 +152,41 @@ class CameraController(
     private fun reopen(l: Lens, m: Mode) {
         closeDevice()
         lens = l
-        mode = if (l.supports(m)) m else Mode.entries.first { l.supports(it) }
+        mode = if (l.supports(m)) m else Mode.entries.firstOrNull { l.supports(it) }
+            ?: return onError("Aucun mode vidéo compatible avec cet objectif")
         settings.manualFocus = settings.manualFocus && !l.fixedFocus
         try {
             cm.openCamera(l.id, executor, object : CameraDevice.StateCallback() {
-                override fun onOpened(d: CameraDevice) { device = d; configure(withRecorder = null) }
+                override fun onOpened(d: CameraDevice) { device = d; configure() }
                 override fun onDisconnected(d: CameraDevice) { d.close(); if (device == d) device = null }
                 override fun onError(d: CameraDevice, e: Int) { d.close(); onError("Erreur caméra $e") }
             })
         } catch (e: Exception) { onError("Ouverture impossible : ${e.message}") }
     }
 
-    private fun configure(withRecorder: Recorder?) {
+    /** (Re)crée la session : aperçu + encodeur préparé pour un démarrage instantané. */
+    fun reconfigure() = handler.post { if (!recording) configure() }
+
+    private fun configure() {
         val dev = device ?: return
         runCatching { session?.close() }; session = null
+        armed?.disarm(); armed = null
         // En haute vitesse, l'aperçu doit avoir exactement la taille de la vidéo.
         val pv = previewSurface(if (mode.highSpeed) mode.size else Size(1920, 1080))
         preview = pv
-        val outs = listOfNotNull(pv, withRecorder?.inputSurface).map { s ->
+        val clock: () -> Long = if (lens.realtimeClock) SystemClock::elapsedRealtimeNanos else System::nanoTime
+        val rec = try {
+            Recorder(ctx, mode.size, mode.fps, settings.bitrateMbps * 1_000_000, mode.tenBit, clock).apply { arm() }
+        } catch (e: Exception) { onError("Encodeur indisponible : ${e.message}"); null }
+        armed = rec
+        val outs = listOfNotNull(pv, rec?.inputSurface).map { s ->
             OutputConfiguration(s).apply {
                 if (mode.tenBit && Build.VERSION.SDK_INT >= 33) dynamicRangeProfile = DynamicRangeProfiles.HLG10
             }
         }
         val type = if (mode.highSpeed) SessionConfiguration.SESSION_HIGH_SPEED else SessionConfiguration.SESSION_REGULAR
         dev.createCaptureSession(SessionConfiguration(type, outs, executor, object : CameraCaptureSession.StateCallback() {
-            override fun onConfigured(s: CameraCaptureSession) {
-                session = s
-                // L'encodeur doit tourner avant que la caméra lui envoie des images.
-                withRecorder?.let { r ->
-                    r.start()
-                    if (settings.gyroLog && gyro.available) gyro.start()
-                }
-                applySettingsInternal()
-            }
+            override fun onConfigured(s: CameraCaptureSession) { session = s; applySettingsInternal() }
             override fun onConfigureFailed(s: CameraCaptureSession) {
                 onError("Configuration refusée pour ${mode.label} sur cet objectif")
             }
@@ -248,42 +259,46 @@ class CameraController(
     // ---------------------------------------------------------------- enregistrement
 
     fun startRecording(orientationHint: Int, done: (Boolean) -> Unit) = handler.post {
-        if (device == null || recording) { done(false); return@post }
+        val r = armed
+        if (device == null || session == null || r == null || recording) { done(false); return@post }
         try {
-            val name = "MaCam_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            val clock: () -> Long = if (lens.realtimeClock) SystemClock::elapsedRealtimeNanos else System::nanoTime
-            val r = Recorder(ctx, name, mode.size, mode.fps, settings.bitrateMbps * 1_000_000, mode.tenBit, orientationHint, clock)
-            r.prepare()
+            r.begin("MaCam_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()), orientationHint)
+            armed = null
             recorder = r
-            configure(withRecorder = r)
+            if (settings.gyroLog && gyro.available) gyro.start()
+            applySettingsInternal() // ajoute l'encodeur aux cibles : démarrage immédiat
             done(true)
         } catch (e: Exception) {
-            recorder = null
             onError("Enregistrement impossible : ${e.message}"); done(false)
         }
     }
 
-    /** Renvoie un résumé de ce qui a été enregistré. */
-    fun stopRecording(done: (String) -> Unit) = handler.post { done(stopRecordingInternal()) }
+    /** Arrête l'enregistrement ; [done] reçoit un résumé une fois le fichier publié. */
+    fun stopRecording(done: (String) -> Unit) = handler.post { stopRecordingInternal(done) }
 
-    private fun stopRecordingInternal(): String {
-        val r = recorder ?: return ""
-        runCatching { session?.stopRepeating(); session?.close() }; session = null
+    private fun stopRecordingInternal(done: (String) -> Unit = {}) {
+        val r = recorder ?: return
         recorder = null
-        val msg = StringBuilder()
-        try {
-            r.stop()
-            msg.append("Vidéo : DCIM/MaCam/${r.baseName}.mp4")
-        } catch (e: Exception) { msg.append("Erreur à l'arrêt : ${e.message}") }
-        if (settings.gyroLog && gyro.available) {
-            // Ramène l'horodatage vidéo dans l'horloge des capteurs (elapsedRealtime).
-            var zero = r.firstVideoTimestampNs
-            if (!lens.realtimeClock) zero += SystemClock.elapsedRealtimeNanos() - System.nanoTime()
-            val readoutMs = (lastInfo?.readoutNs ?: 0L) / 1e6
-            val n = gyro.stopAndSave(r.baseName, zero, readoutMs, "%.0fmm".format(Locale.US, lens.eqMm))
-            msg.append("\nGyroscope : Download/MaCam/${r.baseName}.gcsv ($n mesures)")
-        }
-        if (device != null) configure(withRecorder = null)
-        return msg.toString()
+        applySettingsInternal() // l'aperçu continue sans l'encodeur
+        val withGyro = settings.gyroLog && gyro.available
+        val realtime = lens.realtimeClock
+        val readoutMs = (lastInfo?.readoutNs ?: 0L) / 1e6
+        val lensInfo = "%.0fmm".format(Locale.US, lens.eqMm)
+        // Finalisation hors du fil caméra : l'aperçu ne gèle pas pendant l'écriture du fichier.
+        Thread {
+            val msg = StringBuilder()
+            val uri = r.finish()
+            msg.append(if (uri != null) "Vidéo enregistrée : DCIM/MaCam/${r.baseName}.mp4" else "Échec : aucune image enregistrée")
+            if (withGyro) {
+                var zero = r.firstVideoTimestampNs
+                // Ramène l'horodatage vidéo dans l'horloge des capteurs (elapsedRealtime).
+                if (!realtime) zero += SystemClock.elapsedRealtimeNanos() - System.nanoTime()
+                val n = runCatching { gyro.stopAndSave(r.baseName, zero, readoutMs, lensInfo) }.getOrDefault(0)
+                msg.append("\nGyroscope : Download/MaCam/${r.baseName}.gcsv ($n mesures)")
+            }
+            done(msg.toString())
+            // Prépare l'encodeur suivant (la surface de l'ancien a disparu).
+            handler.post { if (device != null && !recording) configure() }
+        }.start()
     }
 }

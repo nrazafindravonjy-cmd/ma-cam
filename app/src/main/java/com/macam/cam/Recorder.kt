@@ -13,31 +13,37 @@ import android.view.Surface
 import java.nio.ByteBuffer
 
 /**
- * Enregistre la vidéo (HEVC, 8 ou 10 bits HLG) et le son (AAC) dans un MP4 placé dans DCIM/MaCam.
- * Les horodatages vidéo viennent du capteur ; [clock] doit renvoyer la même base de temps (en ns)
- * pour que le son reste synchronisé.
+ * Enregistre la vidéo (HEVC, 8 ou 10 bits HLG) et le son (AAC) dans DCIM/MaCam.
+ *
+ * Cycle de vie :
+ *  1. [arm]   : l'encodeur vidéo est configuré à l'avance et sa surface est intégrée à la session
+ *               caméra, pour que l'enregistrement démarre instantanément ;
+ *  2. [begin] : création du fichier, démarrage des encodeurs et du micro ;
+ *  3. [finish]: arrêt, finalisation du MP4 puis publication dans la galerie (toujours exécuté,
+ *               même en cas d'erreur, pour ne jamais laisser de fichier invisible).
+ *
+ * Les horodatages vidéo viennent du capteur ; [clock] doit renvoyer la même base de temps (ns).
  */
 class Recorder(
     private val ctx: Context,
-    val baseName: String,
     private val size: Size,
     private val fps: Int,
     private val bitrate: Int,
     private val tenBit: Boolean,
-    private val orientationHint: Int,
     private val clock: () -> Long,
 ) {
     lateinit var inputSurface: Surface; private set
+    var baseName = ""; private set
 
     /** Horodatage capteur (ns) de la première image enregistrée, pour aligner le gyroscope. */
     @Volatile var firstVideoTimestampNs = -1L; private set
 
     private lateinit var video: MediaCodec
-    private lateinit var audio: MediaCodec
+    private var audio: MediaCodec? = null
     private var audioRecord: AudioRecord? = null
-    private lateinit var muxer: MediaMuxer
-    private lateinit var pfd: ParcelFileDescriptor
-    private lateinit var uri: Uri
+    private var muxer: MediaMuxer? = null
+    private var pfd: ParcelFileDescriptor? = null
+    private var uri: Uri? = null
     private var startNs = 0L
     @Volatile private var audioRunning = false
     private val threads = mutableListOf<Thread>()
@@ -46,10 +52,12 @@ class Recorder(
     private val lock = Object()
     private var videoTrack = -1
     private var audioTrack = -1
+    private var expectedTracks = 2
     private var muxerStarted = false
+    private var samplesWritten = 0
     private val pending = ArrayList<Triple<Boolean, ByteBuffer, MediaCodec.BufferInfo>>()
 
-    fun prepare() {
+    fun arm() {
         video = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
         video.configure(MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, size.width, size.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -57,6 +65,9 @@ class Recorder(
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            // Temps réel + cadence explicite : indispensable pour tenir 120/240 i/s.
+            setInteger(MediaFormat.KEY_PRIORITY, 0)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
             if (tenBit) {
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10)
                 setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
@@ -68,79 +79,95 @@ class Recorder(
             setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
         }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         inputSurface = video.createInputSurface()
+    }
 
-        audio = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-        audio.configure(MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, SAMPLE_RATE, 2).apply {
-            setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            setInteger(MediaFormat.KEY_BIT_RATE, 256_000)
-            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
-        }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-
+    @SuppressLint("MissingPermission")
+    fun begin(name: String, orientationHint: Int) {
+        baseName = name
         val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, "$baseName.mp4")
+            put(MediaStore.Video.Media.DISPLAY_NAME, "$name.mp4")
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
             put(MediaStore.Video.Media.RELATIVE_PATH, "DCIM/MaCam")
             put(MediaStore.Video.Media.IS_PENDING, 1)
         }
-        uri = ctx.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+        val u = ctx.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
             ?: throw IllegalStateException("Impossible de créer le fichier vidéo")
-        pfd = ctx.contentResolver.openFileDescriptor(uri, "rw")!!
-        muxer = MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-        muxer.setOrientationHint(orientationHint)
-    }
+        uri = u
+        pfd = ctx.contentResolver.openFileDescriptor(u, "rw")!!
+        muxer = MediaMuxer(pfd!!.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            .apply { setOrientationHint(orientationHint) }
 
-    @SuppressLint("MissingPermission")
-    fun start() {
+        audioRecord = try {
+            val min = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
+            AudioRecord(MediaRecorder.AudioSource.CAMCORDER, SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO,
+                AudioFormat.ENCODING_PCM_16BIT, min * 4).takeIf { it.state == AudioRecord.STATE_INITIALIZED }
+        } catch (e: Exception) { Log.w(TAG, "micro indisponible", e); null }
+        if (audioRecord != null) {
+            audio = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
+                configure(MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, SAMPLE_RATE, 2).apply {
+                    setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                    setInteger(MediaFormat.KEY_BIT_RATE, 256_000)
+                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
+        } else expectedTracks = 1 // pas de micro : vidéo seule plutôt qu'aucun fichier
+
         startNs = clock()
         video.start()
-        audio.start()
-        threads += Thread({ drain(video, true) }, "video-drain")
-        audioRecord = try {
-            AudioRecord(MediaRecorder.AudioSource.CAMCORDER, SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT) * 4)
-        } catch (e: Exception) { Log.w(TAG, "micro indisponible", e); null }
-        audioRunning = true
-        threads += Thread({ feedAudio() }, "audio-feed")
-        threads += Thread({ drain(audio, false) }, "audio-drain")
+        threads += Thread({ guarded { drain(video, true) } }, "video-drain")
+        audio?.let { a ->
+            a.start()
+            audioRunning = true
+            threads += Thread({ guarded { feedAudio(a) } }, "audio-feed")
+            threads += Thread({ guarded { drain(a, false) } }, "audio-drain")
+        }
         threads.forEach { it.start() }
     }
 
-    /** Arrête proprement et publie le fichier. Renvoie l'URI de la vidéo. */
-    fun stop(): Uri {
-        video.signalEndOfInputStream()
+    /** Arrête et publie le fichier. Ne lance jamais d'exception. Renvoie l'URI, ou null si rien n'a été écrit. */
+    fun finish(): Uri? {
+        guarded { video.signalEndOfInputStream() }
         audioRunning = false
-        threads.forEach { it.join(5000) }
-        runCatching { audioRecord?.stop() }; audioRecord?.release()
-        runCatching { video.stop() }; video.release()
-        runCatching { audio.stop() }; audio.release()
-        inputSurface.release()
-        synchronized(lock) { if (muxerStarted) runCatching { muxer.stop() } }
-        muxer.release()
-        pfd.close()
-        ctx.contentResolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
-        return uri
+        threads.forEach { it.join(4000) }
+        guarded { audioRecord?.stop() }; guarded { audioRecord?.release() }
+        guarded { video.stop() }; guarded { video.release() }
+        guarded { audio?.stop() }; guarded { audio?.release() }
+        guarded { inputSurface.release() }
+        synchronized(lock) { if (muxerStarted) guarded { muxer?.stop() } }
+        guarded { muxer?.release() }
+        guarded { pfd?.close() }
+        val u = uri ?: return null
+        return if (samplesWritten > 0) {
+            guarded { ctx.contentResolver.update(u, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null) }
+            u
+        } else {
+            guarded { ctx.contentResolver.delete(u, null, null) }
+            null
+        }
     }
 
-    private fun feedAudio() {
-        val rec = audioRecord
+    /** Libère un encodeur préparé mais jamais utilisé. */
+    fun disarm() {
+        guarded { video.release() }
+        guarded { inputSurface.release() }
+    }
+
+    private fun feedAudio(a: MediaCodec) {
+        val rec = audioRecord!!
         var samples = 0L
-        rec?.startRecording()
-        val silence = ByteArray(4096)
+        rec.startRecording()
         while (true) {
-            val running = audioRunning
-            val idx = audio.dequeueInputBuffer(10_000)
-            if (idx < 0) { if (!running) break else continue }
-            val buf = audio.getInputBuffer(idx)!!
-            buf.clear()
-            val read = if (rec != null) rec.read(buf, minOf(buf.remaining(), 4096)) else {
-                Thread.sleep(21); buf.put(silence, 0, minOf(buf.remaining(), silence.size)); silence.size
+            val idx = a.dequeueInputBuffer(10_000)
+            if (idx < 0) continue
+            if (!audioRunning) { // toujours terminer par une fin de flux, sinon le fichier n'est jamais finalisé
+                a.queueInputBuffer(idx, 0, 0, startNs / 1000 + samples * 1_000_000 / SAMPLE_RATE, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                return
             }
-            val ptsUs = (startNs / 1000) + samples * 1_000_000 / SAMPLE_RATE
-            if (read > 0) samples += read / 4 // 2 canaux × 16 bits
-            audio.queueInputBuffer(idx, 0, maxOf(read, 0), ptsUs,
-                if (running) 0 else MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-            if (!running) break
+            val buf = a.getInputBuffer(idx)!!
+            buf.clear()
+            val read = rec.read(buf, minOf(buf.remaining(), 4096)).coerceAtLeast(0)
+            a.queueInputBuffer(idx, 0, read, startNs / 1000 + samples * 1_000_000 / SAMPLE_RATE, 0)
+            samples += read / 4 // 2 canaux × 16 bits
         }
     }
 
@@ -150,11 +177,11 @@ class Recorder(
             val idx = codec.dequeueOutputBuffer(info, 100_000)
             if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 synchronized(lock) {
-                    val t = muxer.addTrack(codec.outputFormat)
+                    val t = muxer!!.addTrack(codec.outputFormat)
                     if (isVideo) videoTrack = t else audioTrack = t
-                    if (videoTrack >= 0 && audioTrack >= 0) {
-                        muxer.start(); muxerStarted = true
-                        for ((v, b, i) in pending) muxer.writeSampleData(if (v) videoTrack else audioTrack, b, i)
+                    if ((if (videoTrack >= 0) 1 else 0) + (if (audioTrack >= 0) 1 else 0) == expectedTracks) {
+                        muxer!!.start(); muxerStarted = true
+                        for ((v, b, i) in pending) { muxer!!.writeSampleData(if (v) videoTrack else audioTrack, b, i); samplesWritten++ }
                         pending.clear()
                     }
                 }
@@ -166,7 +193,7 @@ class Recorder(
                     write(isVideo, codec.getOutputBuffer(idx)!!, info)
                 }
                 codec.releaseOutputBuffer(idx, false)
-                if (eos) break
+                if (eos) return
             }
         }
     }
@@ -178,9 +205,14 @@ class Recorder(
         }
         buf.position(info.offset); buf.limit(info.offset + info.size)
         synchronized(lock) {
-            if (muxerStarted) muxer.writeSampleData(if (isVideo) videoTrack else audioTrack, buf, rel)
+            if (muxerStarted) { muxer!!.writeSampleData(if (isVideo) videoTrack else audioTrack, buf, rel); samplesWritten++ }
             else pending += Triple(isVideo, ByteBuffer.allocate(info.size).put(buf).flip() as ByteBuffer, rel)
         }
+    }
+
+    /** Une erreur dans un fil d'arrière-plan ne doit jamais faire planter l'application. */
+    private inline fun guarded(block: () -> Unit) {
+        try { block() } catch (t: Throwable) { Log.w(TAG, "ignoré", t) }
     }
 
     companion object {

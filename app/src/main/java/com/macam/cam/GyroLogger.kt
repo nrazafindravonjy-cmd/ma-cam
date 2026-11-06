@@ -54,7 +54,7 @@ class GyroLogger(private val ctx: Context) : SensorEventListener {
     fun stopAndSave(baseName: String, zeroNs: Long, readoutMs: Double, lensInfo: String): Int {
         running = false
         sm.unregisterListener(this)
-        val sb = StringBuilder()
+        val sb = StringBuilder(times.size * 80 + 512)
         sb.append("GYROFLOW IMU LOG\nversion,1.3\nid,macam_android\n")
         // Axes du téléphone (Android) : X vers la droite, Y vers le haut, Z vers l'écran.
         sb.append("orientation,XYZ\nnote,Ma Cam\nvendor,Xiaomi\n")
@@ -67,8 +67,10 @@ class GyroLogger(private val ctx: Context) : SensorEventListener {
             n = times.size
             for (i in 0 until n) {
                 val s = samples[i]
-                val tMs = (times[i] - zeroNs) / 1e6
-                sb.append("%.3f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f\n".format(Locale.US, tMs, s[0], s[1], s[2], s[3], s[4], s[5]))
+                // Écriture directe (sans String.format, ~20× plus rapide) ; toString() utilise toujours le point décimal.
+                sb.append((times[i] - zeroNs) / 1000 / 1000.0)
+                for (v in s) sb.append(',').append(v)
+                sb.append('\n')
             }
         }
         val values = ContentValues().apply {

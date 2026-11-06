@@ -79,7 +79,9 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        installCrashLog()
         buildUi()
+        showPreviousCrash()
     }
 
     override fun onResume() {
@@ -313,6 +315,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         val c = cam ?: return
         val opts = listOf(50, 75, 100)
         c.settings.bitrateMbps = opts[(opts.indexOf(c.settings.bitrateMbps) + 1) % opts.size]
+        c.reconfigure() // l'encodeur préparé doit être recréé avec le nouveau débit
         refreshButtons()
     }
 
@@ -338,6 +341,38 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         } else {
             c.stopRecording { msg -> runOnUiThread { setRecordingUi(false); Toast.makeText(this, msg, Toast.LENGTH_LONG).show() } }
         }
+    }
+
+    // ------------------------------------------------------------------ journal de plantage
+
+    private val crashFile get() = java.io.File(filesDir, "crash.txt")
+
+    private fun installCrashLog() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            runCatching {
+                crashFile.writeText("Ma Cam ${packageManager.getPackageInfo(packageName, 0).versionName} | " +
+                    "${android.os.Build.MODEL} | Android ${android.os.Build.VERSION.RELEASE}\nFil : ${t.name}\n" +
+                    android.util.Log.getStackTraceString(e))
+            }
+            previous?.uncaughtException(t, e)
+        }
+    }
+
+    private fun showPreviousCrash() {
+        val f = crashFile
+        if (!f.exists()) return
+        val text = f.readText(); f.delete()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("L'application a planté la dernière fois")
+            .setMessage(text.take(1500))
+            .setPositiveButton("Partager") { _, _ ->
+                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"; putExtra(Intent.EXTRA_TEXT, text)
+                }, "Partager le rapport de plantage"))
+            }
+            .setNegativeButton("Fermer", null)
+            .show()
     }
 
     private fun setRecordingUi(on: Boolean) {

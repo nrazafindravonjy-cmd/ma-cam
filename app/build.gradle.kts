@@ -10,8 +10,8 @@ android {
         applicationId = "com.macam"
         minSdk = 29
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3-video"
+        versionCode = 4
+        versionName = "0.4-video"
     }
     buildTypes {
         release { isMinifyEnabled = false }
