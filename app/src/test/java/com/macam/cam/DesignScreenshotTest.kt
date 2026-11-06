@@ -37,8 +37,8 @@ class DesignScreenshotTest {
         File(dir, out).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
-    @Test fun photo() = shoot(Tab.PHOTO, "scene_day.jpg", "HDR+ · 8 images · HIGH · 12 Go · RAW", "1_photo.png")
-    @Test fun night() = shoot(Tab.NIGHT, "scene_city.jpg", "Nuit · 13 images · ne bougez pas (3 s)", "2_nuit.png")
-    @Test fun video() = shoot(Tab.VIDEO, "scene_day.jpg", "4K30 HDR  ISO 100  1/60  MAP ∞", "3_video.png")
+    @Test fun photo() = shoot(Tab.PHOTO, "scene_day.jpg", "HDR+", "1_photo.png")
+    @Test fun night() = shoot(Tab.NIGHT, "scene_city.jpg", "Nuit · ne bougez pas · 3 s", "2_nuit.png")
+    @Test fun video() = shoot(Tab.VIDEO, "scene_day.jpg", "4K30 HDR   ISO 100 · 1/60 · ∞", "3_video.png")
     @Test fun portrait() = shoot(Tab.PORTRAIT, "scene_city.jpg", "Portrait (traitement du fabricant)", "4_portrait.png")
 }

@@ -158,10 +158,15 @@ class PhotoController(
         onStatus(statusLine())
     }
 
-    fun statusLine() = buildString {
-        append(when (mode) { PhotoMode.PHOTO -> if (superRes) "Zoom SR 2×" else "HDR+"; PhotoMode.NIGHT -> "Nuit"; PhotoMode.PORTRAIT -> "Portrait" })
-        if (mode != PhotoMode.PORTRAIT) append(" · ${profile.frames(mode == PhotoMode.NIGHT)} images · $profile")
+    /** Statut court et sans jargon (attention sélective, charge cognitive). */
+    fun statusLine() = when (mode) {
+        PhotoMode.PHOTO -> if (superRes) "Zoom 2× haute définition" else "HDR+"
+        PhotoMode.NIGHT -> "Nuit · tenez le téléphone stable"
+        PhotoMode.PORTRAIT -> "Portrait"
     }
+
+    /** Progression d'une capture (0 → 1), ou -1 quand il n'y en a pas (gradation du but, Zeigarnik). */
+    var onProgress: (Float) -> Unit = {}
 
     private fun previewRequest(d: CameraDevice): CaptureRequest.Builder =
         d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -248,7 +253,20 @@ class PhotoController(
         val rotation = jpegRotation(deviceOrientation)
         val name = "MaCam_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val total = p.exposureNs * p.frames / 1e9
-        onStatus("${p.label} : ${p.frames} images" + if (total > 1.5) " · ne bougez pas (%.0f s)".format(total) else "")
+        onStatus(if (total > 1.5) "${p.label} · ne bougez pas · %.0f s".format(total) else "${p.label} · ${p.frames} images")
+        onProgress(0f)
+        // Compte à rebours pour les poses longues : une durée visible paraît plus courte (Parkinson).
+        if (total > 1.5) {
+            val end = android.os.SystemClock.uptimeMillis() + (total * 1000).toLong()
+            handler.post(object : Runnable {
+                override fun run() {
+                    val left = (end - android.os.SystemClock.uptimeMillis()) / 1000
+                    if (left <= 0 || !busy) return
+                    onStatus("${p.label} · ne bougez pas · $left s")
+                    handler.postDelayed(this, 1000)
+                }
+            })
+        }
 
         val refResult = CountDownLatch(1)
         var firstResult: TotalCaptureResult? = null
@@ -261,7 +279,7 @@ class PhotoController(
         job.onDone = { engine, result ->
             try { finishAndSave(engine, result, name, rotation, p) }
             catch (e: Throwable) { onError("Traitement impossible : ${e.message}") }
-            finally { engine.close(); busy = false; if (currentJob == job) currentJob = null }
+            finally { engine.close(); busy = false; onProgress(-1f); if (currentJob == job) currentJob = null }
         }
 
         r.setOnImageAvailableListener({ rd ->
@@ -339,7 +357,7 @@ class PhotoController(
             if (f.fmt == ImageFormat.RAW_SENSOR) e.addRaw(f.planes[0], f.rowStrides[0])
             else e.addYuv(f.planes[0], f.rowStrides[0], f.planes[1], f.planes[2], f.rowStrides[1], f.pixelStrides[1])
             count++
-            onStatus("Fusion $count/$expected")
+            onProgress(count.toFloat() / expected)
             if (count + failures >= expected) complete()
         }
 
@@ -354,6 +372,9 @@ class PhotoController(
             val done = onDone ?: return
             val res = last as? TotalCaptureResult
             val r = firstRes ?: res ?: run { e.close(); busy = false; onError("Métadonnées manquantes"); return }
+            // Flow : sur un appareil puissant, on peut déjà reprendre une photo pendant le rendu
+            // (le fil de travail traite les rafales l'une après l'autre).
+            if (profile.tier == DeviceProfile.Tier.HIGH) { busy = false; onProgress(-1f); onStatus(statusLine()) }
             done(e, r)
         }
 
@@ -410,7 +431,14 @@ class PhotoController(
         onSaved(Saver.saveJpeg(ctx, bmp, rotation, name, p.iso.takeIf { it > 0 }, p.exposureNs.takeIf { it > 0 }, frames))
         bmp.recycle()
         rawBuf?.let { Saver.saveDng(ctx, lens.chars, result, it, Size(w, h), rotation, name) }
-        onStatus("Enregistrée : DCIM/MaCam/$name.jpg ($frames images${if (rawBuf != null) " + DNG" else ""})")
+        onProgress(-1f)
+        celebrate("Photo enregistrée${if (rawBuf != null) " + RAW" else ""}")
+    }
+
+    /** Fin positive (règle de l'apogée) : confirmation brève, puis retour au statut normal. */
+    private fun celebrate(msg: String) {
+        onStatus("✓ $msg")
+        handler.postDelayed({ if (!busy) onStatus(statusLine()) }, 1800)
     }
 
     private fun jpegRotation(deviceOrientation: Int): Int {
@@ -455,7 +483,7 @@ class PhotoController(
             val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
             img.close()
             worker.execute {
-                try { onSaved(Saver.saveJpegBytes(ctx, bytes, name)); onStatus("Enregistrée : DCIM/MaCam/$name.jpg") }
+                try { onSaved(Saver.saveJpegBytes(ctx, bytes, name)); celebrate("Portrait enregistré") }
                 catch (e: Exception) { onError("Enregistrement impossible : ${e.message}") }
                 finally { busy = false }
             }

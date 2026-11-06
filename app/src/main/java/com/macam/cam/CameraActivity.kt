@@ -104,8 +104,14 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         // Mémoire : on rouvre le dernier mode et l'état du panneau de réglages.
         tab = runCatching { Tab.valueOf(prefs.getString("tab", "PHOTO")!!) }.getOrDefault(Tab.PHOTO)
         settingsOpen = prefs.getBoolean("settingsOpen", false)
+        hdr = prefs.getBoolean("hdr", true)
         buildUi()
         loadLatestThumbnail()
+        // Paradoxe de l'utilisateur actif : pas de mode d'emploi, une seule astuce au premier lancement.
+        if (!prefs.getBoolean("hintShown", false)) {
+            prefs.edit().putBoolean("hintShown", true).apply()
+            info.postDelayed({ info.text = "Touchez pour la netteté · glissez pour changer de mode" }, 1500)
+        }
         showPreviousCrash()
     }
 
@@ -161,6 +167,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
                 onStatus = { t -> runOnUiThread { info.text = t; refreshButtons() } },
                 onError = toast)
             photo!!.onSaved = { uri -> runOnUiThread { showThumbnail(uri) } }
+            photo!!.onProgress = { f -> runOnUiThread { progress = f; styleShutter() } }
             photo!!.start(m = mode)
             showOverlay(null)
         }
@@ -175,6 +182,9 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         photo?.release(); photo = null
         tab = t
         prefs.edit().putString("tab", t.name).apply()
+        // Réponse immédiate (< 400 ms, seuil de Doherty) : un voile masque la réouverture de la caméra.
+        curtain.animate().cancel(); curtain.alpha = 1f
+        curtain.animate().alpha(0f).setStartDelay(350).setDuration(300).start()
         startCamera()
     }
 
@@ -248,6 +258,13 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var flash: View
     private var thumbUri: android.net.Uri? = null
     private var busyPulse: android.animation.ObjectAnimator? = null
+    private var progress = -1f
+    private var hdr = true
+    private lateinit var flipBtn: Button
+    private lateinit var curtain: View
+    private lateinit var imageHeader: TextView
+    private lateinit var aidsHeader: TextView
+    private lateinit var hdrBtn: Button
     private var iconRotation = 0f
     private val prefs by lazy { getSharedPreferences("macam", MODE_PRIVATE) }
     private val blurHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -275,26 +292,28 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             setPadding(16.dp, 8.dp, 16.dp, 8.dp)
             typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
         }
-        lensRow = row(); modeRow = row()
+        // Les zooms partagent une même piste (connectivité unifiée) : on comprend qu'ils forment un choix unique.
+        lensRow = row().apply { background = GradientDrawable().apply { cornerRadius = 26.dp.toFloat(); setColor(0x26000000) } }
+        modeRow = row()
 
-        expoBtn = chip("Expo", R.drawable.ic_exposure) { cycleExposure() }
-        focusBtn = chip("MAP", R.drawable.ic_focus) { toggleFocus() }
-        wbBtn = chip("BdB", R.drawable.ic_wb) { cycleWb() }
+        expoBtn = chip("Exposition", R.drawable.ic_exposure) { cycleExposure() }
+        focusBtn = chip("Netteté", R.drawable.ic_focus) { toggleFocus() }
+        wbBtn = chip("Blancs", R.drawable.ic_wb) { cycleWb() }
         eisBtn = chip("Stab.", R.drawable.ic_stab) { val c = cam ?: return@chip; c.settings.eis = !c.settings.eis; c.applySettings(); refreshButtons() }
-        rateBtn = chip("Débit", R.drawable.ic_bitrate) { cycleBitrate() }
+        rateBtn = chip("Qualité", R.drawable.ic_bitrate) { cycleBitrate() }
         gyroBtn = chip("Gyro", R.drawable.ic_gyro) { val c = cam ?: return@chip; c.settings.gyroLog = !c.settings.gyroLog; refreshButtons() }
         val diagBtn = chip("Diagnostic", R.drawable.ic_diag) { startActivity(Intent(this, DiagnosticActivity::class.java)) }
-        settingsRow = row().apply { listOf(expoBtn, focusBtn, wbBtn, eisBtn, rateBtn, gyroBtn).forEach { addView(it) } }
+        hdrBtn = chip("HDR", R.drawable.ic_exposure) { toggleHdr() }
+        settingsRow = row().apply { listOf(hdrBtn, expoBtn, focusBtn, wbBtn, eisBtn, rateBtn).forEach { addView(it) } }
         zebraBtn = chip("Zébras", R.drawable.ic_zebra) { cam?.let { it.tools.zebra = !it.tools.zebra; it.applySettings() }; refreshButtons() }
         peakBtn = chip("Peaking", R.drawable.ic_peaking) { cam?.let { it.tools.peaking = !it.tools.peaking; it.applySettings() }; refreshButtons() }
         falseBtn = chip("Couleurs", R.drawable.ic_falsecolor) { cam?.let { it.tools.falseColor = !it.tools.falseColor; it.applySettings() }; refreshButtons() }
-        flatBtn = chip("Plat", R.drawable.ic_flat) { cam?.let { it.settings.flat = !it.settings.flat; it.applySettings() }; refreshButtons() }
-        toolsRow = row().apply { listOf(zebraBtn, peakBtn, falseBtn, flatBtn, diagBtn).forEach { addView(it) } }
-        dngBtn = chip("DNG", R.drawable.ic_raw) { photo?.let { it.saveDng = !it.saveDng }; refreshButtons() }
+        flatBtn = chip("Profil Log", R.drawable.ic_flat) { cam?.let { it.settings.flat = !it.settings.flat; it.applySettings() }; refreshButtons() }
+        toolsRow = row().apply { listOf(zebraBtn, peakBtn, falseBtn, flatBtn, gyroBtn).forEach { addView(it) } }
+        dngBtn = chip("RAW", R.drawable.ic_raw) { photo?.let { it.saveDng = !it.saveDng }; refreshButtons() }
         photoRow = row().apply {
             gravity = Gravity.CENTER_HORIZONTAL
             addView(dngBtn)
-            addView(chip("Diagnostic", R.drawable.ic_diag) { startActivity(Intent(this@CameraActivity, DiagnosticActivity::class.java)) })
         }
         val tabIcons = mapOf(Tab.PHOTO to R.drawable.ic_photo, Tab.NIGHT to R.drawable.ic_night,
             Tab.PORTRAIT to R.drawable.ic_portrait, Tab.VIDEO to R.drawable.ic_video)
@@ -327,6 +346,8 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             val d = getDrawable(R.drawable.ic_tune)!!.mutate().apply { setBounds(0, 0, 22.dp, 22.dp) }
             setCompoundDrawablesRelative(d, null, null, null); setPadding(11.dp, 0, 0, 0)
             background = glass(23)
+            tooltipText = "Réglages (appui long : diagnostic)"
+            setOnLongClickListener { startActivity(Intent(this@CameraActivity, DiagnosticActivity::class.java)); true }
             setOnClickListener {
                 settingsOpen = !settingsOpen
                 prefs.edit().putBoolean("settingsOpen", settingsOpen).apply()
@@ -348,19 +369,31 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             alpha = 0f; isClickable = false
         }
         flash = View(this).apply { setBackgroundColor(Color.WHITE); alpha = 0f; isClickable = false }
+        curtain = View(this).apply { setBackgroundColor(0xFF050607.toInt()); alpha = 0f; isClickable = false; isFocusable = false }
+        // Titres de section (région commune, chunking) dans les réglages dépliés.
+        imageHeader = sectionHeader("IMAGE"); aidsHeader = sectionHeader("AIDES AU TOURNAGE")
+        // Caméra avant : bouton « retourner » (modèle mental courant), plus mélangée aux zooms.
+        flipBtn = Button(this).apply {
+            contentDescription = "Changer de caméra"; tooltipText = "Caméra avant / arrière"; stateListAnimator = null; text = ""
+            val d = getDrawable(R.drawable.ic_flip)!!.mutate().apply { setBounds(0, 0, 22.dp, 22.dp) }
+            setCompoundDrawablesRelative(d, null, null, null); setPadding(11.dp, 0, 0, 0)
+            background = glass(23)
+            setOnClickListener { flipCamera() }
+        }
         val shutterRow = LinearLayout(this).apply {
             gravity = Gravity.CENTER
             addView(thumb, LinearLayout.LayoutParams(46.dp, 46.dp))
             addView(recordBtn, LinearLayout.LayoutParams(76.dp, 76.dp).apply { setMargins(36.dp, 0, 36.dp, 0) })
-            addView(gearBtn, LinearLayout.LayoutParams(46.dp, 46.dp))
+            addView(flipBtn, LinearLayout.LayoutParams(46.dp, 46.dp))
         }
 
         // Carte de verre flottante (détachée des bords) qui floute réellement l'aperçu situé derrière.
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 12.dp, 0, 12.dp)
-            addView(scroll(lensRow).center()); addView(scroll(modeRow)); addView(scroll(settingsRow))
-            addView(scroll(toolsRow)); addView(scroll(photoRow).center())
+            addView(scroll(lensRow).center()); addView(scroll(modeRow).center())
+            addView(imageHeader); addView(scroll(settingsRow))
+            addView(aidsHeader); addView(scroll(toolsRow)); addView(scroll(photoRow).center())
             addView(manualPanel)
             addView(shutterRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { setMargins(0, 8.dp, 0, 10.dp) })
             addView(tabRow, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL })
@@ -379,6 +412,8 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             addView(focusRing, FrameLayout.LayoutParams(72.dp, 72.dp))
             addView(infoGlass, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = 12.dp })
             addView(panelGlass, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(10.dp, 0, 10.dp, 10.dp) })
+            addView(gearBtn, FrameLayout.LayoutParams(46.dp, 46.dp, Gravity.TOP or Gravity.END).apply { setMargins(0, 8.dp, 12.dp, 0) })
+            addView(curtain, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         })
         layoutPreview(Size(1440, 1080))
     }
@@ -409,15 +444,19 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         for (i in 0 until tabRow.childCount) (tabRow.getChildAt(i) as Button).selected(Tab.entries[i] == t)
         lensRow.removeAllViews(); modeRow.removeAllViews()
         if (t != Tab.PORTRAIT) {
-            for (l in listOf("0.6x", "1x", "5x", "Avant")) {
+            for (l in listOf("0.6x", "1x", "5x")) {
                 lensRow.addView(lensChip(l) {}.apply { selected(l == "1x") })
-                if (l == "1x" && t == Tab.PHOTO) lensRow.addView(chip("2× SR", R.drawable.ic_zoom) {}.apply { selected(false) })
+                if (l == "1x" && t == Tab.PHOTO) lensRow.addView(lensChip("2x") {}.apply { selected(false) })
             }
         }
-        if (t == Tab.VIDEO) for (m in Mode.entries.filter { it.size.width == 3840 })
-            modeRow.addView(chip(m.label) {}.apply { selected(m == Mode.UHD30_HLG) })
+        if (t == Tab.VIDEO) for (k in listOf("4K30", "4K60", "4K120", "1080p240"))
+            modeRow.addView(chip(k) {}.apply { selected(k == "4K30") })
+        hdrBtn.selected(true)
+        imageHeader.visibility = if (t == Tab.VIDEO) View.VISIBLE else View.GONE
+        aidsHeader.visibility = imageHeader.visibility
+        if (t == Tab.NIGHT) { progress = 0.62f; styleShutter() }
         refreshButtons()
-        expoBtn.text = "Auto"; focusBtn.text = "AF"; wbBtn.text = "BdB"; rateBtn.text = "100 Mb/s"
+        expoBtn.text = "Expo auto"; focusBtn.text = "Netteté auto"; wbBtn.text = "Blancs auto"; rateBtn.text = "100 Mb/s"
         listOf(expoBtn, focusBtn, wbBtn, rateBtn, falseBtn, flatBtn, peakBtn, dngBtn).forEach { it.selected(false) }
         listOf(eisBtn, gyroBtn, zebraBtn).forEach { it.selected(true) }
         evBar.progress = 0
@@ -561,7 +600,9 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             setColor(if (video) 0xFFFF3B30.toInt() else Color.WHITE)
         }
         val inset = if (rec) 24.dp else 9.dp
-        recordBtn.background = android.graphics.drawable.LayerDrawable(arrayOf(ring, core)).apply {
+        val layers = mutableListOf<android.graphics.drawable.Drawable>(ring, core)
+        if (!video && progress >= 0f) layers += ProgressArc(progress, accent, 4.dp.toFloat())
+        recordBtn.background = android.graphics.drawable.LayerDrawable(layers.toTypedArray()).apply {
             setLayerInset(1, inset, inset, inset, inset)
         }
         recordBtn.alpha = if (recordBtn.isEnabled) 1f else 0.45f
@@ -632,14 +673,19 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         val c = cam ?: return
         lensRow.removeAllViews()
         val main = Lens.main(c.lenses)
-        for (l in c.lenses) {
-            val label = if (l.front) "Avant" else "%.1fx".format(Locale.US, l.eqMm / main.eqMm).replace(".0x", "x")
-            lensRow.addView(lensChip(label) { if (!c.recording) { c.start(l, c.mode); handlerRefresh() } }.apply { selected(l == c.lens) })
+        for (l in c.lenses.filter { it.front == c.lens.front }) {
+            lensRow.addView(lensChip(zoomLabel(l, main)) { if (!c.recording) { c.start(l, variant(l, c.mode)); handlerRefresh() } }.apply { selected(l == c.lens) })
         }
+        (lensRow.parent as View).visibility = if (lensRow.childCount > 1) View.VISIBLE else View.GONE
+        // Loi de Hick : un seul choix par cadence ; le HDR est un interrupteur séparé.
         modeRow.removeAllViews()
+        val shown = mutableSetOf<String>()
         for (m in Mode.entries) {
-            if (!c.lens.supports(m)) continue
-            modeRow.addView(chip(m.label) { if (!c.recording) { c.start(c.lens, m); handlerRefresh() } }.apply { selected(m == c.mode) })
+            val key = m.label.removeSuffix(" HDR")
+            if (key in shown || (!c.lens.supports(m) && !c.lens.supports(twin(m)))) continue
+            shown += key
+            modeRow.addView(chip(key) { if (!c.recording) { c.start(c.lens, variant(c.lens, m)); handlerRefresh() } }
+                .apply { selected(c.mode.label.removeSuffix(" HDR") == key) })
         }
     }
 
@@ -647,15 +693,53 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         lensRow.removeAllViews(); modeRow.removeAllViews()
         if (p.mode == PhotoMode.PORTRAIT) return
         val main = Lens.main(p.lenses)
-        for (l in p.lenses) {
-            val label = if (l.front) "Avant" else "%.1fx".format(Locale.US, l.eqMm / main.eqMm).replace(".0x", "x")
-            lensRow.addView(lensChip(label) { if (!p.busy) { p.start(l, p.mode, false); photoRefresh() } }
+        for (l in p.lenses.filter { it.front == p.lens.front }) {
+            lensRow.addView(lensChip(zoomLabel(l, main)) { if (!p.busy) { p.start(l, p.mode, false); photoRefresh() } }
                 .apply { selected(l == p.lens && !p.superRes) })
-            // Zoom super-résolution 2× proposé juste après l'objectif principal.
-            if (l == main && p.mode == PhotoMode.PHOTO)
-                lensRow.addView(chip("2× SR", R.drawable.ic_zoom) { if (!p.busy) { p.start(main, p.mode, true); photoRefresh() } }
-                    .apply { selected(p.superRes) })
+            // Zoom 2× haute définition : même forme que les autres zooms (similarité).
+            if (l == main && p.mode == PhotoMode.PHOTO && p.profile.srScale > 0)
+                lensRow.addView(lensChip("2x") { if (!p.busy) { p.start(main, p.mode, true); photoRefresh() } }
+                    .apply { selected(p.superRes); tooltipText = "Zoom 2× haute définition (multi-images)" })
         }
+        (lensRow.parent as View).visibility = if (lensRow.childCount > 1) View.VISIBLE else View.GONE
+    }
+
+    private fun zoomLabel(l: Lens, main: Lens) = "%.1fx".format(Locale.US, l.eqMm / main.eqMm).replace(".0x", "x")
+
+    /** Mode jumeau (même cadence, HDR inversé). */
+    private fun twin(m: Mode) = Mode.entries.firstOrNull { it.size == m.size && it.fps == m.fps && it.highSpeed == m.highSpeed && it.tenBit != m.tenBit } ?: m
+
+    /** Variante du mode respectant l'interrupteur HDR quand l'objectif le permet. */
+    private fun variant(l: Lens, m: Mode): Mode {
+        val want = if (m.tenBit == hdr) m else twin(m)
+        return if (l.supports(want)) want else m
+    }
+
+    private fun toggleHdr() {
+        val c = cam ?: return
+        if (c.recording) return
+        hdr = !hdr
+        prefs.edit().putBoolean("hdr", hdr).apply()
+        c.start(c.lens, variant(c.lens, c.mode)); handlerRefresh()
+    }
+
+    private fun flipCamera() {
+        cam?.let { c ->
+            if (c.recording) return
+            val target = if (c.lens.front) Lens.main(c.lenses) else c.lenses.firstOrNull { it.front } ?: return
+            c.start(target, variant(target, c.mode)); handlerRefresh()
+        }
+        photo?.let { p ->
+            if (p.busy) return
+            val target = if (p.lens.front) Lens.main(p.lenses) else p.lenses.firstOrNull { it.front } ?: return
+            p.start(target, p.mode, false); photoRefresh()
+        }
+        flipBtn.animate().rotationBy(180f).setDuration(250).start()
+    }
+
+    private fun sectionHeader(t: String) = TextView(this).apply {
+        text = t; textSize = 10f; letterSpacing = 0.12f; setTextColor(0x99FFFFFF.toInt())
+        setPadding(22.dp, 8.dp, 0, 2.dp)
     }
 
     /** Pastille ronde pour le choix d'objectif (0.6x, 1x, 5x…). */
@@ -677,6 +761,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         (modeRow.parent as View).visibility = vis(video)
         // Réglages détaillés repliés derrière le bouton ⚙ pour laisser l'image respirer.
         for (r in listOf(settingsRow, toolsRow)) (r.parent as View).visibility = vis(video && settingsOpen)
+        imageHeader.visibility = vis(video && settingsOpen); aidsHeader.visibility = vis(video && settingsOpen)
         (photoRow.parent as View).visibility = vis(!video && settingsOpen)
         manualPanel.visibility = vis(video && settingsOpen)
         gearBtn.selected(settingsOpen)
@@ -690,16 +775,17 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         // Enregistrement : l'info devient rouge, visible d'un coup d'œil.
         infoGlass.tint = if (cam?.recording == true) 0xB3C62828.toInt() else 0x40101418
         val c = cam ?: return
+        hdrBtn.selected(c.mode.tenBit); hdrBtn.isEnabled = c.lens.supports(twin(c.mode)) || c.mode.tenBit
         zebraBtn.selected(c.tools.zebra); peakBtn.selected(c.tools.peaking); falseBtn.selected(c.tools.falseColor)
         flatBtn.selected(c.settings.flat); flatBtn.isEnabled = !c.mode.tenBit && !c.mode.highSpeed
         val st = c.settings
         val hs = c.mode.highSpeed
-        expoBtn.text = when (st.exposure) { Exposure.AUTO -> "Auto"; Exposure.LOCK -> "Verrou"; Exposure.MANUAL -> "Manuel" }
+        expoBtn.text = when (st.exposure) { Exposure.AUTO -> "Expo auto"; Exposure.LOCK -> "Expo verrouillée"; Exposure.MANUAL -> "Expo manuelle" }
         expoBtn.selected(st.exposure != Exposure.AUTO)
-        focusBtn.text = if (c.lens.fixedFocus) "Fixe" else if (st.manualFocus) "Manuel" else "AF"
+        focusBtn.text = if (c.lens.fixedFocus) "Netteté fixe" else if (st.manualFocus) "Netteté manuelle" else "Netteté auto"
         focusBtn.selected(st.manualFocus); focusBtn.isEnabled = !c.lens.fixedFocus && !hs
         wbBtn.text = wbModes[wbIndex].first; wbBtn.selected(wbIndex != 0)
-        eisBtn.text = if (st.eis) "Stab." else "Stab. off"; eisBtn.selected(!st.eis)
+        eisBtn.text = if (st.eis) "Stabilisation" else "Stab. coupée"; eisBtn.selected(!st.eis)
         rateBtn.text = "${st.bitrateMbps} Mb/s"
         gyroBtn.text = "Gyro"; gyroBtn.selected(st.gyroLog)
         listOf(expoBtn, wbBtn, eisBtn).forEach { it.isEnabled = !hs }
@@ -768,7 +854,21 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             val s = (SystemClock.elapsedRealtime() - recordStart) / 1000
             "  ● REC %02d:%02d".format(Locale.US, s / 60, s % 60)
         } else ""
-        info.text = "${c.mode.label}  ISO ${i.iso}  $shutter  MAP $focus$rec"
+        // Mémoire de travail : les réglages non automatiques restent visibles même panneau fermé.
+        val st = c.settings
+        val badges = buildList {
+            if (st.exposure == Exposure.LOCK) add("Expo 🔒")
+            if (st.exposure == Exposure.MANUAL) add("Expo M")
+            if (st.manualFocus) add("Netteté M")
+            if (st.flat) add("Log")
+            if (st.zoom > 1.05f) add("×%.1f".format(Locale.US, st.zoom))
+        }.joinToString(" · ")
+        info.text = buildString {
+            append(c.mode.label)
+            append("   ISO ${i.iso} · $shutter · $focus")
+            if (badges.isNotEmpty()) append("   $badges")
+            append(rec)
+        }
     }
 
     private fun toggleRecording() {
@@ -781,7 +881,10 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             c.startRecording(hint) { ok -> runOnUiThread { if (ok) recordStart = SystemClock.elapsedRealtime(); setRecordingUi(ok) } }
         } else {
             c.stopRecording { msg -> runOnUiThread {
-                setRecordingUi(false); Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                setRecordingUi(false)
+                // Fin positive et discrète (règle de l'apogée) ; le détail reste disponible en appui long.
+                info.text = if (c.lastSaved != null) "✓ Vidéo enregistrée" else msg
+                info.tooltipText = msg
                 c.lastSaved?.let { showThumbnail(it) }
             } }
         }
@@ -827,4 +930,18 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         for (i in 0 until modeRow.childCount) modeRow.getChildAt(i).isEnabled = !on
         rateBtn.isEnabled = !on; gyroBtn.isEnabled = !on
     }
+}
+
+/** Arc de progression autour du déclencheur (gradation du but). */
+private class ProgressArc(private val f: Float, color: Int, private val w: Float) : android.graphics.drawable.Drawable() {
+    private val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.STROKE; strokeWidth = w; this.color = color; strokeCap = android.graphics.Paint.Cap.ROUND
+    }
+    override fun draw(c: android.graphics.Canvas) {
+        val r = android.graphics.RectF(bounds).apply { inset(w / 2, w / 2) }
+        c.drawArc(r, -90f, 360f * f.coerceIn(0.02f, 1f), false, p)
+    }
+    override fun setAlpha(a: Int) { p.alpha = a }
+    override fun setColorFilter(cf: android.graphics.ColorFilter?) { p.colorFilter = cf }
+    @Deprecated("") override fun getOpacity() = android.graphics.PixelFormat.TRANSLUCENT
 }
