@@ -18,6 +18,13 @@ class StabMathTest {
         assertEquals(3000.0, g.focalPx!!, 1e-9); assertEquals(90, g.sensorOrientation)
     }
 
+    @Test fun readsOldLogsAndEisFlag() {
+        val old = GyroLog.parse("GYROFLOW IMU LOG\nnote,Ma Cam\nlens_info,23mm\nt,gx,gy,gz\n0,0,0,0")
+        assertEquals(23.0, old.eqMm!!, 1e-9); assertEquals(null, old.focalPx); assertEquals(false, old.eis)
+        val eis = GyroLog.parse("GYROFLOW IMU LOG\nnote,Ma Cam f=2694.0 aw=4096 o=90 front=0 eis=1\nt,gx,gy,gz\n0,0,0,0")
+        assertEquals(true, eis.eis)
+    }
+
     @Test fun integratesConstantRotation() {
         // 1 rad/s autour de Z pendant 1 s : la caméra doit avoir tourné de 1 rad.
         val rows = (0..1000).map { "$it,0,0,1.0,0,0,1" }.toTypedArray()

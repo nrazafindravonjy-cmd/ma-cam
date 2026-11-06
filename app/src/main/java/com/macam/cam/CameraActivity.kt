@@ -299,9 +299,20 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         expoBtn = chip("Exposition", R.drawable.ic_exposure) { cycleExposure() }
         focusBtn = chip("Netteté", R.drawable.ic_focus) { toggleFocus() }
         wbBtn = chip("Blancs", R.drawable.ic_wb) { cycleWb() }
-        eisBtn = chip("Stab.", R.drawable.ic_stab) { val c = cam ?: return@chip; c.settings.eis = !c.settings.eis; c.applySettings(); refreshButtons() }
+        eisBtn = chip("Stab.", R.drawable.ic_stab) {
+            val c = cam ?: return@chip
+            c.settings.eis = !c.settings.eis
+            if (c.settings.eis && c.settings.gyroLog) { c.settings.gyroLog = false; info.text = "Stabilisation du téléphone · journal Atelier coupé" }
+            c.applySettings(); refreshButtons()
+        }
         rateBtn = chip("Qualité", R.drawable.ic_bitrate) { cycleBitrate() }
-        gyroBtn = chip("Gyro", R.drawable.ic_gyro) { val c = cam ?: return@chip; c.settings.gyroLog = !c.settings.gyroLog; refreshButtons() }
+        // Les deux stabilisations s'excluent : on choisit celle du téléphone OU celle de l'Atelier.
+        gyroBtn = chip("Stab. Atelier", R.drawable.ic_gyro) {
+            val c = cam ?: return@chip
+            c.settings.gyroLog = !c.settings.gyroLog
+            if (c.settings.gyroLog && c.settings.eis) { c.settings.eis = false; c.applySettings(); info.text = "Stabilisation Atelier · stabilisation du téléphone coupée" }
+            refreshButtons()
+        }
         val diagBtn = chip("Diagnostic", R.drawable.ic_diag) { startActivity(Intent(this, DiagnosticActivity::class.java)) }
         hdrBtn = chip("HDR", R.drawable.ic_exposure) { toggleHdr() }
         settingsRow = row().apply { listOf(hdrBtn, expoBtn, focusBtn, wbBtn, eisBtn, rateBtn).forEach { addView(it) } }
@@ -796,7 +807,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         wbBtn.text = wbModes[wbIndex].first; wbBtn.selected(wbIndex != 0)
         eisBtn.text = if (st.eis) "Stabilisation" else "Stab. coupée"; eisBtn.selected(!st.eis)
         rateBtn.text = "${st.bitrateMbps} Mb/s"
-        gyroBtn.text = "Gyro"; gyroBtn.selected(st.gyroLog)
+        gyroBtn.text = "Stab. Atelier"; gyroBtn.selected(st.gyroLog)
         listOf(expoBtn, wbBtn, eisBtn).forEach { it.isEnabled = !hs }
 
         val manual = st.exposure == Exposure.MANUAL && !hs

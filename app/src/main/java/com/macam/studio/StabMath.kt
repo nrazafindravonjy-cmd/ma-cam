@@ -57,12 +57,17 @@ class GyroLog(
     /** Focale en pixels du capteur complet, largeur active du capteur, orientation du capteur, caméra avant. */
     val focalPx: Double?, val activeWidth: Int?, val sensorOrientation: Int, val front: Boolean,
     val readoutMs: Double,
+    /** Focale équivalente 24×36 (mm), présente aussi dans les anciens journaux. */
+    val eqMm: Double? = null,
+    /** La stabilisation électronique du téléphone était active (gyroscope et image ne correspondent plus). */
+    val eis: Boolean = false,
 ) {
     companion object {
         fun parse(text: String): GyroLog {
             val t = ArrayList<Double>(); val x = ArrayList<Double>(); val y = ArrayList<Double>(); val z = ArrayList<Double>()
             var tscale = 0.001; var gscale = 1.0; var readout = 0.0
             var focal: Double? = null; var active: Int? = null; var orient = 90; var front = false
+            var eq: Double? = null; var eis = false
             var data = false
             for (raw in text.lineSequence()) {
                 val line = raw.trim()
@@ -74,9 +79,10 @@ class GyroLog(
                         "tscale" -> tscale = parts[1].toDouble()
                         "gscale" -> gscale = parts[1].toDouble()
                         "frame_readout_time" -> readout = parts[1].toDouble()
+                        "lens_info" -> eq = parts.getOrNull(1)?.removeSuffix("mm")?.toDoubleOrNull()
                         "note" -> Regex("(\\w+)=([-\\d.]+)").findAll(line).forEach { m ->
                             val (k, v) = m.destructured
-                            when (k) { "f" -> focal = v.toDouble(); "aw" -> active = v.toInt(); "o" -> orient = v.toInt(); "front" -> front = v == "1" }
+                            when (k) { "f" -> focal = v.toDouble(); "aw" -> active = v.toInt(); "o" -> orient = v.toInt(); "front" -> front = v == "1"; "eis" -> eis = v == "1" }
                         }
                     }
                     continue
@@ -85,7 +91,7 @@ class GyroLog(
                 t += parts[0].toDouble() * tscale * 1000
                 x += parts[1].toDouble() * gscale; y += parts[2].toDouble() * gscale; z += parts[3].toDouble() * gscale
             }
-            return GyroLog(t.toDoubleArray(), x.toDoubleArray(), y.toDoubleArray(), z.toDoubleArray(), focal, active, orient, front, readout)
+            return GyroLog(t.toDoubleArray(), x.toDoubleArray(), y.toDoubleArray(), z.toDoubleArray(), focal, active, orient, front, readout, eq, eis)
         }
     }
 }

@@ -32,6 +32,9 @@ class VideoStudio(private val ctx: Context) {
     )
 
     @Volatile var cancelled = false
+    /** Le dernier traitement a-t-il conservé le HDR ? (pour informer l'utilisateur) */
+    @Volatile var lastRunHdr = false; private set
+    @Volatile var lastRunSourceHdr = false; private set
 
     /** Traite [input] et renvoie l'URI de la vidéo produite dans DCIM/MaCam. */
     fun process(input: Uri, gyro: GyroLog?, opts: Options, outName: String, progress: (Float) -> Unit): Uri {
@@ -50,21 +53,40 @@ class VideoStudio(private val ctx: Context) {
         val stab = if (opts.stabilize && gyro != null && gyro.tMs.size > 10)
             Stabilizer(gyro, opts.smoothingS, opts.zoom) else null
         // Focale en pixels de la vidéo : focale capteur × (largeur vidéo / largeur active du capteur).
-        val fPx = gyro?.focalPx?.let { f -> f * w / (gyro.activeWidth ?: w).toDouble() } ?: (0.75 * w)
+        // Focale de la vidéo en pixels : mesurée (journaux récents) ou déduite de la focale équivalente 24×36.
+        val fPx = gyro?.focalPx?.let { f -> f * w / (gyro.activeWidth ?: w).toDouble() }
+            ?: gyro?.eqMm?.let { eq -> eq / 43.27 * 1.25 * maxOf(w, h) }
+            ?: (0.75 * maxOf(w, h))
         stab?.limit(stab.maxAngleFor(fPx, w, h))
         val readoutMs = gyro?.readoutMs ?: 0.0
 
-        // Encodeur (sortie SDR 8 bits)
+        // HDR conservé si la source est HLG, qu'aucun look SDR n'est demandé et que le GPU sait le faire.
+        val srcHlg = vFmt.containsKey(MediaFormat.KEY_COLOR_TRANSFER) &&
+            vFmt.getInteger(MediaFormat.KEY_COLOR_TRANSFER) == MediaFormat.COLOR_TRANSFER_HLG
+        val egl = Egl(tryHdr = srcHlg && opts.lut == null)
+        val hdr = egl.hdr
+        lastRunHdr = hdr
+        lastRunSourceHdr = srcHlg
+
         val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
         enc.configure(MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, srcBitrate.coerceIn(20_000_000, 100_000_000))
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            // Traitement hors temps réel : on demande au codec d'aller aussi vite que possible.
+            setInteger(MediaFormat.KEY_PRIORITY, 1)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+            if (hdr) {
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10)
+                setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
+                setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_HLG)
+                setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+            }
         }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        val egl = Egl(enc.createInputSurface())
+        egl.attach(enc.createInputSurface())
         enc.start()
-        val gl = Pipeline(w, h, opts.lut)
+        val gl = Pipeline(w, h, opts.lut, hdr)
 
         // Décodeur vers une texture GPU
         val frameThread = HandlerThread("frames").apply { start() }
@@ -74,7 +96,10 @@ class VideoStudio(private val ctx: Context) {
         val decSurface = Surface(st)
         ex.selectTrack(vIdx)
         val dec = MediaCodec.createDecoderByType(vFmt.getString(MediaFormat.KEY_MIME)!!)
-        dec.configure(vFmt, decSurface, null, 0)
+        dec.configure(MediaFormat(vFmt).apply {
+            setInteger(MediaFormat.KEY_PRIORITY, 1)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+        }, decSurface, null, 0)
         dec.start()
 
         // Sortie
@@ -178,34 +203,65 @@ class VideoStudio(private val ctx: Context) {
 
     // ------------------------------------------------------------------ EGL
 
-    private class Egl(private val window: Surface) {
+    /**
+     * Contexte GPU. En HDR : tampon 10 bits (RGBA 10-10-10-2) et surface déclarée HLG/BT.2020, à condition que
+     * le téléphone expose EGL_EXT_gl_colorspace_bt2020_hlg et GL_EXT_YUV_target ; sinon repli en SDR 8 bits.
+     */
+    private class Egl(tryHdr: Boolean) {
         val display: EGLDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-        val surface: EGLSurface
+        lateinit var surface: EGLSurface; private set
         private val context: EGLContext
+        private val config: EGLConfig
+        private val pbuffer: EGLSurface
+        private var window: Surface? = null
+        val hdr: Boolean
 
         init {
             val v = IntArray(2); EGL14.eglInitialize(display, v, 0, v, 1)
-            val attrs = intArrayOf(EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR, 0x3142 /* EGL_RECORDABLE_ANDROID */, 1, EGL14.EGL_NONE)
-            val cfg = arrayOfNulls<EGLConfig>(1); val n = IntArray(1)
-            EGL14.eglChooseConfig(display, attrs, 0, cfg, 0, 1, n, 0)
-            context = EGL14.eglCreateContext(display, cfg[0], EGL14.EGL_NO_CONTEXT, intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE), 0)
-            surface = EGL14.eglCreateWindowSurface(display, cfg[0], window, intArrayOf(EGL14.EGL_NONE), 0)
-            check(EGL14.eglMakeCurrent(display, surface, surface, context)) { "EGL indisponible" }
+            val eglExt = EGL14.eglQueryString(display, EGL14.EGL_EXTENSIONS) ?: ""
+            val wantHdr = tryHdr && "EGL_EXT_gl_colorspace_bt2020_hlg" in eglExt
+            fun choose(bits: IntArray): EGLConfig? {
+                val attrs = intArrayOf(EGL14.EGL_RED_SIZE, bits[0], EGL14.EGL_GREEN_SIZE, bits[1], EGL14.EGL_BLUE_SIZE, bits[2], EGL14.EGL_ALPHA_SIZE, bits[3],
+                    EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR, 0x3142 /* EGL_RECORDABLE_ANDROID */, 1,
+                    EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT, EGL14.EGL_NONE)
+                val cfg = arrayOfNulls<EGLConfig>(8); val n = IntArray(1)
+                EGL14.eglChooseConfig(display, attrs, 0, cfg, 0, cfg.size, n, 0)
+                // eglChooseConfig accepte « au moins » ces tailles : on exige la taille exacte du rouge.
+                return cfg.take(n[0]).firstOrNull { c ->
+                    val r = IntArray(1); EGL14.eglGetConfigAttrib(display, c, EGL14.EGL_RED_SIZE, r, 0); r[0] == bits[0]
+                }
+            }
+            val hdrCfg = if (wantHdr) choose(intArrayOf(10, 10, 10, 2)) else null
+            config = hdrCfg ?: choose(intArrayOf(8, 8, 8, 8))!!
+            context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE), 0)
+            pbuffer = EGL14.eglCreatePbufferSurface(display, config, intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE), 0)
+            check(EGL14.eglMakeCurrent(display, pbuffer, pbuffer, context)) { "EGL indisponible" }
+            val glExt = GLES30.glGetString(GLES30.GL_EXTENSIONS) ?: ""
+            hdr = hdrCfg != null && "GL_EXT_YUV_target" in glExt
+        }
+
+        fun attach(win: Surface) {
+            window = win
+            val attrs = if (hdr) intArrayOf(0x309D /* EGL_GL_COLORSPACE_KHR */, 0x3540 /* BT2020_HLG_EXT */, EGL14.EGL_NONE)
+                        else intArrayOf(EGL14.EGL_NONE)
+            surface = EGL14.eglCreateWindowSurface(display, config, win, attrs, 0)
+            check(EGL14.eglMakeCurrent(display, surface, surface, context)) { "Surface d'encodage indisponible" }
         }
 
         fun swap() = EGL14.eglSwapBuffers(display, surface)
 
         fun release() {
             EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-            EGL14.eglDestroySurface(display, surface); EGL14.eglDestroyContext(display, context)
-            EGL14.eglTerminate(display); window.release()
+            if (::surface.isInitialized) EGL14.eglDestroySurface(display, surface)
+            EGL14.eglDestroySurface(display, pbuffer)
+            EGL14.eglDestroyContext(display, context)
+            EGL14.eglTerminate(display); window?.release()
         }
     }
 
     // ------------------------------------------------------------------ passes GPU
 
-    private class Pipeline(private val w: Int, private val h: Int, lut: Lut?) {
+    private class Pipeline(private val w: Int, private val h: Int, lut: Lut?, private val hdr: Boolean) {
         val oesTex: Int
         private val stabProg: Int; private val finishProg: Int; private val copyProg: Int
         private val fbo = IntArray(1)
@@ -221,7 +277,7 @@ class VideoStudio(private val ctx: Context) {
             oesTex = genTex(GLES11Ext.GL_TEXTURE_EXTERNAL_OES)
             texA = colorTex(); texOut[0] = colorTex(); texOut[1] = colorTex()
             GLES30.glGenFramebuffers(1, fbo, 0)
-            stabProg = program(VS, FS_STAB); finishProg = program(VS, FS_FINISH); copyProg = program(VS, FS_COPY)
+            stabProg = program(VS, if (hdr) FS_STAB_HDR else FS_STAB); finishProg = program(VS, FS_FINISH); copyProg = program(VS, FS_COPY)
             if (lut != null) {
                 lutTex = genTex(GLES30.GL_TEXTURE_3D)
                 val bytes = ByteBuffer.allocateDirect(lut.data.size / 3 * 4)
@@ -243,7 +299,9 @@ class VideoStudio(private val ctx: Context) {
 
         private fun colorTex(): Int {
             val t = genTex(GLES30.GL_TEXTURE_2D)
-            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+            // 10 bits par canal en HDR, pour ne pas créer de bandes dans les dégradés.
+            if (hdr) GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGB10_A2, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_INT_2_10_10_10_REV, null)
+            else GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
             return t
         }
 
@@ -350,6 +408,34 @@ void main() {
         if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }
     }
     o = texture(uTex, (uSt * vec4(uv, 0.0, 1.0)).xy);
+}"""
+
+            /**
+             * Variante HDR : lecture des valeurs YUV 10 bits brutes (GL_EXT_YUV_target), conversion BT.2020
+             * plage limitée → R'G'B' HLG, sans passer par la conversion 8 bits du pilote.
+             */
+            const val FS_STAB_HDR = """#version 300 es
+#extension GL_EXT_YUV_target : require
+precision highp float;
+uniform __samplerExternal2DY2YEXT uTex; uniform mat4 uSt; uniform mat3 uHt; uniform mat3 uHb;
+uniform vec2 uSize; uniform int uStab;
+in vec2 vUv; out vec4 o;
+void main() {
+    vec2 uv = vUv;
+    if (uStab == 1) {
+        vec2 pix = vec2(vUv.x, 1.0 - vUv.y) * uSize;
+        float f = pix.y / uSize.y;
+        vec3 q = (uHt * (1.0 - f) + uHb * f) * vec3(pix, 1.0);
+        vec2 p = q.xy / q.z;
+        uv = vec2(p.x / uSize.x, 1.0 - p.y / uSize.y);
+        if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }
+    }
+    vec3 yuv = texture(uTex, (uSt * vec4(uv, 0.0, 1.0)).xy).xyz;
+    float y = (yuv.x * 1023.0 - 64.0) / 876.0;
+    float cb = (yuv.y * 1023.0 - 512.0) / 896.0;
+    float cr = (yuv.z * 1023.0 - 512.0) / 896.0;
+    vec3 rgb = vec3(y + 1.4746 * cr, y - 0.16455 * cb - 0.57135 * cr, y + 1.8814 * cb);
+    o = vec4(clamp(rgb, 0.0, 1.0), 1.0);
 }"""
 
             /** Filtre récursif adaptatif : moyenne avec l'image précédente, sauf là où ça bouge. */

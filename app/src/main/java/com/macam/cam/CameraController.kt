@@ -99,7 +99,8 @@ data class Settings(
     var awbLock: Boolean = false,
     var eis: Boolean = true,
     var bitrateMbps: Int = 100,
-    var gyroLog: Boolean = true,
+    /** Journal gyroscope pour l'Atelier ; exclusif avec [eis] (sinon l'image ne suit plus le gyroscope). */
+    var gyroLog: Boolean = false,
     /** Zoom numérique (pincement), 1 = aucun. */
     var zoom: Float = 1f,
     /** Courbe plate type « log » (modes SDR uniquement). */
@@ -392,8 +393,8 @@ class CameraController(
             val px = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)!!
             val active = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
             val fPx = lens.focalMm / (phys.width / px.width)
-            "f=%.1f aw=%d o=%d front=%d".format(Locale.US, fPx, active?.width() ?: px.width,
-                c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90, if (lens.front) 1 else 0)
+            "f=%.1f aw=%d o=%d front=%d eis=%d".format(Locale.US, fPx, active?.width() ?: px.width,
+                c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90, if (lens.front) 1 else 0, if (settings.eis) 1 else 0)
         }
         // Finalisation hors du fil caméra : l'aperçu ne gèle pas pendant l'écriture du fichier.
         Thread {

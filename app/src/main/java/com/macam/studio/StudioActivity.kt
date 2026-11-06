@@ -100,7 +100,7 @@ class StudioActivity : Activity() {
             addView(header("DÉBRUITAGE")); addView(HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false; addView(dnRow) })
             addView(header("LOOK")); addView(HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false; isHorizontalFadingEdgeEnabled = true; addView(lookRow) })
             addView(TextView(context).apply {
-                text = "Les vidéos HDR sont converties en SDR. Pour la stabilisation, filmez avec « Stabilisation » coupée."
+                text = "HDR conservé quand le téléphone le permet (sans look). Pour la stabilisation, filmez avec « Stab. Atelier »."
                 textSize = 11f; setTextColor(0x80FFFFFF.toInt()); setPadding(4.dp, 14.dp, 0, 0)
             })
         }
@@ -123,6 +123,7 @@ class StudioActivity : Activity() {
         title.text = if (video == null) "Aucune vidéo" else videoName
         gyroInfo.text = when {
             video == null -> ""
+            gyro?.eis == true -> "Journal trouvé, mais la stabilisation du téléphone était active : résultat moins précis"
             gyro != null -> "Journal gyroscope trouvé · ${gyro!!.tMs.size} mesures"
             else -> "Pas de journal gyroscope : stabilisation indisponible"
         }
@@ -201,17 +202,26 @@ class StudioActivity : Activity() {
             lut = lut,
         )
         val s = VideoStudio(this); studio = s
+        val t0 = android.os.SystemClock.elapsedRealtime()
         go.text = "Annuler"; progress.visibility = View.VISIBLE; progress.progress = 0
         status.text = "Traitement…"
         val outName = videoName.substringBeforeLast('.') + "_atelier"
         Thread {
             val result = runCatching { s.process(v, if (stab > 0) gyro else null, opts, outName) { f ->
-                runOnUiThread { progress.progress = (f * 1000).toInt(); status.text = "Traitement… ${(f * 100).toInt()} %" }
+                runOnUiThread {
+                    progress.progress = (f * 1000).toInt()
+                    // Temps restant estimé (rend l'attente prévisible).
+                    val el = (android.os.SystemClock.elapsedRealtime() - t0) / 1000.0
+                    val left = if (f > 0.03f) (el / f * (1 - f)).toInt() else -1
+                    status.text = "Traitement… ${(f * 100).toInt()} %" + if (left >= 0) " · encore ${left / 60} min ${left % 60} s" else ""
+                }
             } }
             runOnUiThread {
                 studio = null; go.text = "Traiter la vidéo"
                 result.onSuccess { uri ->
-                    status.text = "✓ Vidéo enregistrée : DCIM/MaCam/$outName.mp4"
+                    val secs = (android.os.SystemClock.elapsedRealtime() - t0) / 1000
+                    val range = when { s.lastRunHdr -> " · HDR conservé"; s.lastRunSourceHdr -> " · convertie en SDR"; else -> "" }
+                    status.text = "✓ Vidéo enregistrée en ${secs / 60} min ${secs % 60} s$range\nDCIM/MaCam/$outName.mp4"
                     go.text = "Ouvrir la vidéo"
                     go.setOnClickListener {
                         runCatching { startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
