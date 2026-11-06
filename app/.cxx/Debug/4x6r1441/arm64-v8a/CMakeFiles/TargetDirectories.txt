@@ -1,0 +1,3 @@
+/home/user/ma-cam/app/.cxx/Debug/4x6r1441/arm64-v8a/CMakeFiles/macam.dir
+/home/user/ma-cam/app/.cxx/Debug/4x6r1441/arm64-v8a/CMakeFiles/edit_cache.dir
+/home/user/ma-cam/app/.cxx/Debug/4x6r1441/arm64-v8a/CMakeFiles/rebuild_cache.dir

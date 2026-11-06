@@ -2,6 +2,25 @@
 
 Application caméra Android qui améliore la photo et la vidéo par traitement logiciel.
 
+## Photo multi-images (v0.5)
+
+Le moteur natif `app/src/main/cpp/engine.cpp` réimplémente les publications de Google (aucun code GCam) :
+
+- **HDR+** (Hasinoff et al., 2016) : rafale RAW sous-exposée d'1 IL, alignement hiérarchique par tuiles
+  (pyramide à 4 niveaux, 3 candidats, sous-pixel), fusion robuste de type Wiener, puis dématriçage
+  Malvar-He-Cutler, couleurs du capteur, tonalité locale, débruitage chroma et netteté ;
+- **Nuit et Astro** (Liba et al., 2019) : temps de pose calculé d'après le tremblement mesuré au gyroscope
+  (flou ≤ 1,5 px), jusqu'à 1 s sur appui stable et 15 × 8 s en astrophotographie ;
+- **Zoom super-résolution 2×** (Wronski et al., 2019, version simplifiée) : accumulation sous-pixel des
+  photosites par noyaux gaussiens, sans dématriçage ;
+- **Portrait** : extension Bokeh du fabricant ;
+- **DNG fusionné** en option ;
+- **adaptation à l'appareil** (`DeviceProfile`) : nombre d'images, RAW ou YUV et résolution selon la mémoire
+  et le capteur, pour les téléphones d'entrée de gamme.
+
+Sur des rafales synthétiques (8 images, texture naturelle, bruit réaliste), la fusion divise le bruit
+par 2,56 (maximum théorique 2,83) et n'introduit pas de fantôme sur un objet en mouvement.
+
 ## Étape 2 : caméra vidéo (v0.3)
 
 L'écran principal est une caméra vidéo qui ouvre directement chaque objectif physique :
@@ -11,7 +30,8 @@ L'écran principal est une caméra vidéo qui ouvre directement chaque objectif 
 - exposition auto, verrouillée ou manuelle (ISO, obturation), correction EV, mise au point auto ou manuelle,
   balance des blancs auto, verrouillée ou en préréglage, stabilisation électronique activable, débit 50/75/100 Mb/s ;
 - son AAC 48 kHz stéréo ;
-- journal gyroscope au format Gyroflow (`.gcsv`).
+- journal gyroscope au format Gyroflow (`.gcsv`) ;
+- outils pro : zébras, focus peaking, fausses couleurs et profil plat (courbe log, modes SDR).
 
 Les vidéos sont enregistrées dans `DCIM/MaCam/` et les journaux gyroscope dans `Download/MaCam/`, avec le même nom.
 Pour Gyroflow, filmez avec « Stab. OFF » : la stabilisation électronique du téléphone fausse la correction.

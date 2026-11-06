@@ -97,6 +97,8 @@ data class Settings(
     var eis: Boolean = true,
     var bitrateMbps: Int = 100,
     var gyroLog: Boolean = true,
+    /** Courbe plate type « log » (modes SDR uniquement). */
+    var flat: Boolean = false,
 )
 
 /** Mesures en direct renvoyées par le capteur. */
@@ -107,7 +109,15 @@ class CameraController(
     private val previewSurface: (Size) -> Surface,
     private val onInfo: (LiveInfo) -> Unit,
     private val onError: (String) -> Unit,
+    /** Reçoit le calque des outils pro (zébras, peaking, fausses couleurs), orienté comme le capteur. */
+    private val onOverlay: (android.graphics.Bitmap?) -> Unit = {},
 ) {
+    val tools = ProTools()
+    private var analysis: android.media.ImageReader? = null
+    private var overlayBmp: android.graphics.Bitmap? = null
+    private var lastOverlay = 0L
+    /** Désactivé pour la session courante si le pilote refuse le flux d'analyse. */
+    private var analysisAllowed = true
     private val cm = ctx.getSystemService(CameraManager::class.java)
     private val thread = HandlerThread("camera").apply { start() }
     val handler = Handler(thread.looper)
@@ -144,6 +154,7 @@ class CameraController(
 
     private fun closeDevice() {
         runCatching { session?.close() }; session = null
+        runCatching { analysis?.close() }; analysis = null
         armed?.disarm(); armed = null
         runCatching { device?.close() }; device = null
     }
@@ -155,6 +166,7 @@ class CameraController(
         mode = if (l.supports(m)) m else Mode.entries.firstOrNull { l.supports(it) }
             ?: return onError("Aucun mode vidéo compatible avec cet objectif")
         settings.manualFocus = settings.manualFocus && !l.fixedFocus
+        analysisAllowed = true
         try {
             cm.openCamera(l.id, executor, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) { device = d; configure() }
@@ -179,7 +191,10 @@ class CameraController(
             Recorder(ctx, mode.size, mode.fps, settings.bitrateMbps * 1_000_000, mode.tenBit, clock).apply { arm() }
         } catch (e: Exception) { onError("Encodeur indisponible : ${e.message}"); null }
         armed = rec
-        val outs = listOfNotNull(pv, rec?.inputSurface).map { s ->
+        runCatching { analysis?.close() }; analysis = null
+        val an = if (analysisAllowed && !mode.highSpeed) createAnalysisReader() else null
+        analysis = an
+        val outs = listOfNotNull(pv, rec?.inputSurface, an?.surface).map { s ->
             OutputConfiguration(s).apply {
                 if (mode.tenBit && Build.VERSION.SDK_INT >= 33) dynamicRangeProfile = DynamicRangeProfiles.HLG10
             }
@@ -188,9 +203,35 @@ class CameraController(
         dev.createCaptureSession(SessionConfiguration(type, outs, executor, object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) { session = s; applySettingsInternal() }
             override fun onConfigureFailed(s: CameraCaptureSession) {
-                onError("Configuration refusée pour ${mode.label} sur cet objectif")
+                if (an != null) { // on réessaie sans le flux d'analyse (outils pro indisponibles)
+                    analysisAllowed = false
+                    onError("Outils pro indisponibles dans ce mode")
+                    configure()
+                } else onError("Configuration refusée pour ${mode.label} sur cet objectif")
             }
         }))
+    }
+
+    /** Petit flux basse définition pour les outils pro (P010 en HDR, YUV sinon). */
+    private fun createAnalysisReader(): android.media.ImageReader? {
+        val map = lens.chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
+        val fmt = if (mode.tenBit) android.graphics.ImageFormat.YCBCR_P010 else android.graphics.ImageFormat.YUV_420_888
+        val size = map.getOutputSizes(fmt)?.filter { it.width * 9 == it.height * 16 && it.width >= 480 }
+            ?.minByOrNull { it.width } ?: return null
+        val r = android.media.ImageReader.newInstance(size.width, size.height, fmt, 2)
+        r.setOnImageAvailableListener({ rd ->
+            val img = rd.acquireLatestImage() ?: return@setOnImageAvailableListener
+            try {
+                val now = SystemClock.uptimeMillis()
+                if (tools.anyEnabled && now - lastOverlay > 66) { // ~15 i/s suffisent pour un calque
+                    lastOverlay = now
+                    val bmp = overlayBmp?.takeIf { it.width == img.width && it.height == img.height }
+                        ?: android.graphics.Bitmap.createBitmap(img.width, img.height, android.graphics.Bitmap.Config.ARGB_8888).also { overlayBmp = it }
+                    if (tools.render(img, bmp)) onOverlay(bmp)
+                }
+            } finally { img.close() }
+        }, handler)
+        return r
     }
 
     // ---------------------------------------------------------------- réglages
@@ -201,7 +242,9 @@ class CameraController(
         val s = session ?: return
         val dev = device ?: return
         val st = settings
-        val targets = listOfNotNull(preview, recorder?.inputSurface)
+        // Le flux d'analyse n'est demandé que si un outil est actif (économie d'énergie).
+        val targets = listOfNotNull(preview, recorder?.inputSurface, analysis?.surface?.takeIf { tools.anyEnabled })
+        if (!tools.anyEnabled) onOverlay(null)
         val b = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         targets.forEach { b.addTarget(it) }
         b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(mode.fps, mode.fps))
@@ -230,6 +273,13 @@ class CameraController(
                     b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
                     b.set(CaptureRequest.LENS_FOCUS_DISTANCE, st.focusDiopters.coerceIn(0f, lens.minFocusDiopters))
                 } else b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            }
+            if (st.flat && !mode.tenBit) {
+                val pts = lens.chars.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 0
+                if (pts >= 2) {
+                    b.set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)
+                    b.set(CaptureRequest.TONEMAP_CURVE, ProTools.flatCurve(minOf(pts, 64)))
+                }
             }
             b.set(CaptureRequest.CONTROL_AWB_MODE, st.awbMode)
             b.set(CaptureRequest.CONTROL_AWB_LOCK, st.awbLock)

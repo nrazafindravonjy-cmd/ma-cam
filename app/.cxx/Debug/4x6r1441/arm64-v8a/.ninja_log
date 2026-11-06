@@ -1,0 +1,7 @@
+# ninja log v6
+1	2977	1793982843313768368	CMakeFiles/macam.dir/engine.cpp.o	b18c10e62882d066
+2978	3005	1793982846290210017	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	7c590816b1ed1e70
+3	2975	1793983071380139761	CMakeFiles/macam.dir/engine.cpp.o	b18c10e62882d066
+2976	3016	1793983074356139938	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	7c590816b1ed1e70
+2	2873	1793983155260144747	CMakeFiles/macam.dir/engine.cpp.o	b18c10e62882d066
+2873	2898	1793983158132144917	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	7c590816b1ed1e70

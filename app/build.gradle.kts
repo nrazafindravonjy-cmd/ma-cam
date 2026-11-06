@@ -10,8 +10,14 @@ android {
         applicationId = "com.macam"
         minSdk = 29
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.4-video"
+        versionCode = 5
+        versionName = "0.5"
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        externalNativeBuild { cmake { arguments += "-DANDROID_ARM_NEON=TRUE" } }
+    }
+    ndkVersion = "27.1.12297006"
+    externalNativeBuild {
+        cmake { path = file("src/main/cpp/CMakeLists.txt"); version = "3.31.6" }
     }
     buildTypes {
         release { isMinifyEnabled = false }
