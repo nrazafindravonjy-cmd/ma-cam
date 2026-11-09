@@ -217,6 +217,7 @@ struct Engine {
     // Pixels défectueux connus (calibration personnelle) : indices dans la mosaïque.
     std::vector<uint8_t> hotMask;
     std::vector<int> hotList;
+    std::vector<float> lut; int lutN = 0;
 
     /** Gain de vignetage au photosite (x, y), interpolé bilinéairement sur la grille. */
     float shadingGain(int x, int y) const {
@@ -478,7 +479,26 @@ struct RenderParams {
     float wb[3], ccm[9];
     float exposure, compression, detail, sharpen, chroma, saturation;
     bool linearInput; // false pour le YUV (déjà gamma)
+    const float* lut = nullptr; int lutN = 0; // style personnel : table 3D sur valeurs sRGB
 };
+
+/** Interpolation trilinéaire dans une table 3D n³ (R le plus rapide). */
+inline void applyLut(float* c, const float* lut, int n) {
+    float f[3]; int i0[3], i1[3]; float t[3];
+    for (int k = 0; k < 3; k++) {
+        f[k] = clampf(c[k], 0.f, 1.f) * (n - 1);
+        i0[k] = std::min((int)f[k], n - 2); i1[k] = i0[k] + 1; t[k] = f[k] - i0[k];
+    }
+    auto L = [&](int r, int g, int b, int ch) { return lut[(((size_t)b * n + g) * n + r) * 3 + ch]; };
+    for (int ch = 0; ch < 3; ch++) {
+        float c00 = L(i0[0], i0[1], i0[2], ch) * (1 - t[0]) + L(i1[0], i0[1], i0[2], ch) * t[0];
+        float c10 = L(i0[0], i1[1], i0[2], ch) * (1 - t[0]) + L(i1[0], i1[1], i0[2], ch) * t[0];
+        float c01 = L(i0[0], i0[1], i1[2], ch) * (1 - t[0]) + L(i1[0], i0[1], i1[2], ch) * t[0];
+        float c11 = L(i0[0], i1[1], i1[2], ch) * (1 - t[0]) + L(i1[0], i1[1], i1[2], ch) * t[0];
+        f[ch] = (c00 * (1 - t[1]) + c10 * t[1]) * (1 - t[2]) + (c01 * (1 - t[1]) + c11 * t[1]) * t[2];
+    }
+    c[0] = f[0]; c[1] = f[1]; c[2] = f[2];
+}
 
 inline float srgbGamma(float v) {
     v = clampf(v, 0.f, 1.f);
@@ -530,6 +550,7 @@ void render(std::vector<float>& rgb, int W, int H, const RenderParams& p, uint8_
                 }
                 c[k] = clampf(v, 0.f, 1.f);
             }
+            if (p.lut) applyLut(c, p.lut, p.lutN);
         }
     });
     { Img().d.swap(logL.d); Img().d.swap(base.d); } // libère la mémoire au plus tôt
@@ -761,6 +782,7 @@ JNIEXPORT jboolean JNICALL Java_com_macam_photo_Engine_nRender(JNIEnv* env, jcla
         info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
     void* px;
     if (AndroidBitmap_lockPixels(env, bitmap, &px) < 0) return JNI_FALSE;
+    if (!e->lut.empty()) { p.lut = e->lut.data(); p.lutN = e->lutN; }
     render(rgb, W, H, p, static_cast<uint8_t*>(px), (int)info.stride);
     AndroidBitmap_unlockPixels(env, bitmap);
     LOG("rendu %dx%d à partir de %d images", W, H, e->frames);
@@ -786,6 +808,14 @@ JNIEXPORT void JNICALL Java_com_macam_photo_Engine_nSetHotPixels(JNIEnv* env, jc
     for (int i : e->hotList) if (i >= 0 && (size_t)i < e->hotMask.size()) e->hotMask[i] = 1;
     e->hotList.erase(std::remove_if(e->hotList.begin(), e->hotList.end(),
         [&](int i) { return i < 0 || (size_t)i >= e->hotMask.size(); }), e->hotList.end());
+}
+
+/** Table de couleurs 3D (style personnel), appliquée en fin de rendu. */
+JNIEXPORT void JNICALL Java_com_macam_photo_Engine_nSetLut(JNIEnv* env, jclass, jlong h, jfloatArray data, jint n) {
+    auto* e = reinterpret_cast<Engine*>(h);
+    if (n < 2 || env->GetArrayLength(data) != n * n * n * 3) return;
+    e->lutN = n; e->lut.resize((size_t)n * n * n * 3);
+    env->GetFloatArrayRegion(data, 0, n * n * n * 3, e->lut.data());
 }
 
 JNIEXPORT void JNICALL Java_com_macam_photo_Engine_nRelease(JNIEnv*, jclass, jlong h) {

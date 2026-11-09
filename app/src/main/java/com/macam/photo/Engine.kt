@@ -17,6 +17,7 @@ class Engine private constructor(private var handle: Long) : AutoCloseable {
     fun mergedRaw(out: ByteBuffer) = nGetMergedRaw(handle, out)
     fun setShading(gains: FloatArray, rows: Int, cols: Int) = nSetShading(handle, gains, rows, cols)
     fun setHotPixels(idx: IntArray) = nSetHotPixels(handle, idx)
+    fun setLut(data: FloatArray, n: Int) = nSetLut(handle, data, n)
 
     fun render(bmp: Bitmap, wb: FloatArray, ccm: FloatArray, p: Look) =
         nRender(handle, bmp, wb, ccm, p.exposure, p.compression, p.detail, p.sharpen, p.chroma, p.saturation)
@@ -49,6 +50,7 @@ class Engine private constructor(private var handle: Long) : AutoCloseable {
             compression: Float, detail: Float, sharpen: Float, chroma: Float, saturation: Float): Boolean
         @JvmStatic private external fun nSetShading(h: Long, gains: FloatArray, rows: Int, cols: Int)
         @JvmStatic private external fun nSetHotPixels(h: Long, idx: IntArray)
+        @JvmStatic private external fun nSetLut(h: Long, data: FloatArray, n: Int)
         @JvmStatic private external fun nRelease(h: Long)
     }
 }

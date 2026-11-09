@@ -60,6 +60,8 @@ class PhotoController(
     var superRes = false; private set
     var saveDng = false
     @Volatile var busy = false; private set
+    /** Style personnel appris des retouches Lightroom (null = rendu Ma Cam). */
+    @Volatile var style: com.macam.style.Style? = null
     /** Signer les photos (Content Credentials / C2PA). */
     @Volatile var authenticate = false
         set(v) { field = v; if (v) motion.start() else if (mode != PhotoMode.NIGHT) motion.stop() }
@@ -631,7 +633,10 @@ class PhotoController(
             if (!engine.mergedRaw(rawBuf)) rawBuf = null
         }
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        if (!engine.render(bmp, wb, ccm, look)) throw IllegalStateException("rendu refusé")
+        val st = style?.takeIf { com.macam.Pro.isPro }
+        st?.let { engine.setLut(it.lut(33), 33) }
+        val finalLook = if (st != null) look.copy(detail = look.detail + st.clarity / 100f * 0.3f) else look
+        if (!engine.render(bmp, wb, ccm, finalLook)) throw IllegalStateException("rendu refusé")
         val frames = engine.frames
         onSaved(Saver.saveJpeg(ctx, bmp, rotation, name, p.iso.takeIf { it > 0 }, p.exposureNs.takeIf { it > 0 }, frames, signerFor(p, frames)))
         bmp.recycle()

@@ -227,6 +227,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             photo!!.onSaved = { uri -> runOnUiThread { showThumbnail(uri) } }
             photo!!.onFirstFrame = ::recordStartup
             photo!!.authenticate = prefs.getBoolean("authenticate", false) && com.macam.Pro.isPro
+            photo!!.style = if (prefs.getBoolean("styleOn", true)) loadStyle() else null
             photo!!.onProgress = { f -> runOnUiThread { progress = f; styleShutter() } }
             photo!!.start(m = mode)
             showOverlay(null)
@@ -335,6 +336,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var aidsHeader: TextView
     private lateinit var hdrBtn: Button
     private lateinit var authBtn: Button
+    private lateinit var styleBtn: Button
     private lateinit var stabBar: View
     private lateinit var stabFill: View
     private var stabMeter: StabilityMeter? = null
@@ -396,6 +398,21 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         val studioBtn = chip("Atelier", R.drawable.ic_studio) { openStudio(null) }
         toolsRow = row().apply { listOf(studioBtn, zebraBtn, peakBtn, falseBtn, flatBtn, gyroBtn).forEach { addView(it) } }
         dngBtn = chip("RAW", R.drawable.ic_raw) { photo?.let { it.saveDng = !it.saveDng }; refreshButtons() }
+        styleBtn = chip("Mon style", R.drawable.ic_flat) {
+            com.macam.Pro.gate(this, "Style personnel") {
+                if (prefs.getString("style", null) == null) importStyle()
+                else {
+                    val on = !prefs.getBoolean("styleOn", true)
+                    prefs.edit().putBoolean("styleOn", on).apply()
+                    photo?.style = if (on) loadStyle() else null
+                    info.text = if (on) "Mon style : ${loadStyle()?.describe()}" else "Rendu Ma Cam"
+                    refreshButtons()
+                }
+            }
+        }.apply {
+            tooltipText = "Mon style (appui long : importer des retouches Lightroom .xmp)"
+            setOnLongClickListener { com.macam.Pro.gate(this@CameraActivity, "Style personnel") { importStyle() }; true }
+        }
         authBtn = chip("Authentifier", R.drawable.ic_shield) {
             com.macam.Pro.gate(this, "Authenticité") {
                 val on = !prefs.getBoolean("authenticate", false)
@@ -407,7 +424,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         }
         photoRow = row().apply {
             gravity = Gravity.CENTER_HORIZONTAL
-            addView(dngBtn); addView(authBtn)
+            addView(dngBtn); addView(authBtn); addView(styleBtn)
         }
         val tabIcons = mapOf(Tab.PHOTO to R.drawable.ic_photo, Tab.NIGHT to R.drawable.ic_night,
             Tab.PORTRAIT to R.drawable.ic_portrait, Tab.VIDEO to R.drawable.ic_video)
@@ -710,6 +727,29 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         return out
     }
 
+    // ------------------------------------------------------------------ style personnel
+
+    private fun loadStyle() = prefs.getString("style", null)?.let { runCatching { com.macam.style.Style.fromJson(it) }.getOrNull() }
+
+    /** Importe une ou plusieurs retouches Lightroom (.xmp) et en apprend le style moyen. */
+    private fun importStyle() = startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE); type = "*/*"; putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+    }, REQ_STYLE)
+
+    @Deprecated("API Activity simple")
+    override fun onActivityResult(req: Int, res: Int, data: Intent?) {
+        super.onActivityResult(req, res, data)
+        if (req != REQ_STYLE || data == null) return
+        val uris = data.clipData?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).uri } } ?: listOfNotNull(data.data)
+        val styles = uris.mapNotNull { u -> runCatching { com.macam.style.Style.parseXmp(contentResolver.openInputStream(u)!!.bufferedReader().readText()) }.getOrNull() }
+        if (styles.isEmpty()) { Toast.makeText(this, "Aucun réglage Lightroom trouvé dans ces fichiers", Toast.LENGTH_LONG).show(); return }
+        val s = com.macam.style.Style.average(styles)
+        prefs.edit().putString("style", s.toJson()).putBoolean("styleOn", true).apply()
+        photo?.style = s
+        info.text = "Mon style (${s.sources} retouche${if (s.sources > 1) "s" else ""}) : ${s.describe()}"
+        refreshButtons()
+    }
+
     /** Atelier : stabilisation, débruitage et looks après le tournage. */
     private fun openStudio(video: android.net.Uri?) = com.macam.Pro.gate(this, "Atelier") {
         startActivity(Intent(this, com.macam.studio.StudioActivity::class.java).apply {
@@ -904,6 +944,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         photo?.let { p ->
             dngBtn.selected(p.saveDng); dngBtn.isEnabled = p.mode != PhotoMode.PORTRAIT
             authBtn.selected(p.authenticate)
+            styleBtn.selected(p.style != null)
             recordBtn.isEnabled = !p.busy
             setBusy(p.busy)
         }
@@ -1041,7 +1082,10 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     }
     private var startupRecorded = false
 
-    private companion object { @Volatile var watchdogStarted = false }
+    private companion object {
+        @Volatile var watchdogStarted = false
+        const val REQ_STYLE = 41
+    }
 
     /**
      * Détecteur de blocage (ANR) : si le fil principal ne répond plus pendant 5 s, sa pile d'appels est
