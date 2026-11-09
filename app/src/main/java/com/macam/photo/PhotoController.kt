@@ -91,6 +91,8 @@ class PhotoController(
     }
 
     @Volatile private var closed: CountDownLatch? = null
+    /** Calibration personnelle de l'objectif courant, si elle a été faite. */
+    @Volatile private var calibration: com.macam.calib.SensorCalibration? = null
 
     // ---- Zéro délai (ZSL) : les dernières images du capteur sont gardées en mémoire en permanence.
     /** Actif en mode Photo : la rafale est déjà prise au moment de l'appui. */
@@ -114,6 +116,7 @@ class PhotoController(
         close()
         lens = l; mode = m
         profile = DeviceProfile(ctx, l.chars)
+        calibration = com.macam.calib.SensorCalibration.load(ctx, l.id)
         superRes = sr && m == PhotoMode.PHOTO && profile.srScale > 0
         if (m == PhotoMode.NIGHT) motion.start() else motion.stop()
         // Le mode Portrait passe par l'extension du fabricant, disponible sur la caméra logique.
@@ -477,15 +480,19 @@ class PhotoController(
             val cfa = c.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT) ?: 0
             val pattern = c.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
             val dyn = res?.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL)
-            val black = FloatArray(4) { i ->
+            // Calibration personnelle (si faite) : noir et bruit mesurés sur CE capteur, à l'ISO le plus proche.
+            val iso = res?.get(CaptureResult.SENSOR_SENSITIVITY) ?: 100
+            val cal = calibration?.takeIf { it.width == f.w }
+            val black = cal?.blackFor(iso) ?: FloatArray(4) { i ->
                 dyn?.getOrNull(i) ?: (pattern?.getOffsetForIndex(i % 2, i / 2)?.toFloat() ?: 64f)
             }
             val white = (res?.get(CaptureResult.SENSOR_DYNAMIC_WHITE_LEVEL) ?: c.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: 1023).toFloat()
             val noise = res?.get(CaptureResult.SENSOR_NOISE_PROFILE)
             val ns = noise?.map { it.first }?.average()?.toFloat() ?: 1e-4f
-            val no = noise?.map { it.second }?.average()?.toFloat() ?: 1e-6f
+            val no = cal?.readVarFor(iso) ?: noise?.map { it.second }?.average()?.toFloat() ?: 1e-6f
             val night = mode == PhotoMode.NIGHT
             return createEngineFor(f, cfa, black, white, ns, no, night).also { e ->
+                if (f.fmt == ImageFormat.RAW_SENSOR) cal?.hotPixels?.takeIf { it.isNotEmpty() }?.let { e.setHotPixels(it) }
                 // Correction du vignetage fournie par le capteur (les RAW ne sont pas corrigés).
                 res?.get(CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP)?.let { m ->
                     val g = FloatArray(m.rowCount * m.columnCount * 4)

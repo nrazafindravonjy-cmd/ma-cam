@@ -29,6 +29,10 @@ class DiagnosticActivity : Activity() {
         val buttons = LinearLayout(this).apply {
             addView(runBtn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
             addView(share, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            addView(Button(this@DiagnosticActivity).apply {
+                text = "Calibrer le capteur"
+                setOnClickListener { com.macam.Pro.gate(this@DiagnosticActivity, "Calibration du capteur") { calibrate() } }
+            }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -84,6 +88,24 @@ class DiagnosticActivity : Activity() {
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
         if (results.firstOrNull() == PackageManager.PERMISSION_GRANTED) start()
         else output.text = "Permission caméra refusée : le diagnostic ne peut pas fonctionner."
+    }
+
+    /** Calibration personnelle : objectif posé contre une surface opaque (images noires). */
+    private fun calibrate() {
+        output.text = "Posez le téléphone objectif contre la table, sans bouger…\n"
+        Thread {
+            Thread.sleep(3000)
+            val msg = try {
+                val res = com.macam.calib.CalibrationRunner(this) { s -> runOnUiThread { output.append(s + "\n") } }.run()
+                if (res.isEmpty()) "Aucun objectif RAW à calibrer." else res.joinToString("\n", "✓ Calibration terminée :\n") { c ->
+                    val iso = c.readVar.keys.maxOrNull()
+                    "Objectif ${c.lensId} : ${c.hotPixels.size} pixels défectueux, noir à ISO $iso = " +
+                        c.black[iso]?.joinToString(" / ") { "%.1f".format(java.util.Locale.US, it) }
+                }
+            } catch (e: com.macam.calib.CalibrationRunner.LightLeak) { e.message ?: "Trop de lumière" }
+            catch (e: Exception) { "Échec de la calibration : ${e.message}" }
+            runOnUiThread { output.append(msg + "\n") }
+        }.start()
     }
 
     private fun shareReport() {

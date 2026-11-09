@@ -122,6 +122,9 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     override fun onResume() {
         super.onResume()
         resumed = true
+        getSystemService(android.hardware.SensorManager::class.java).let { sm ->
+            sm.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER)?.let { sm.registerListener(faceDown, it, android.hardware.SensorManager.SENSOR_DELAY_NORMAL) }
+        }
         blurHandler.postDelayed(blurTick, 300)
         orientationListener.enable()
         val missing = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
@@ -143,7 +146,54 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    // ------------------------------------------------------------------ calibration automatique
+
+    /**
+     * Téléphone posé face contre la table, application ouverte (Android interdit la caméra en arrière-plan) :
+     * après 3 s immobile, on calibre le capteur si ce n'est pas fait depuis 30 jours.
+     */
+    private val faceDown = object : android.hardware.SensorEventListener {
+        var since = 0L
+        override fun onSensorChanged(e: android.hardware.SensorEvent) {
+            val down = e.values[2] < -8.8f && kotlin.math.abs(e.values[0]) < 1.5f && kotlin.math.abs(e.values[1]) < 1.5f
+            val now = android.os.SystemClock.uptimeMillis()
+            if (!down) { since = 0; return }
+            if (since == 0L) since = now
+            if (now - since > 3000 && !calibrating && tab != Tab.VIDEO && photo?.busy != true && calibrationDue()) {
+                since = Long.MAX_VALUE / 2
+                runCalibration()
+            }
+        }
+        override fun onAccuracyChanged(s: android.hardware.Sensor?, a: Int) {}
+    }
+    private var calibrating = false
+
+    private fun calibrationDue(): Boolean {
+        if (!com.macam.Pro.isPro) return false
+        val last = prefs.getLong("calibratedAt", 0)
+        return System.currentTimeMillis() - last > 30L * 24 * 3600 * 1000
+    }
+
+    private fun runCalibration() {
+        calibrating = true
+        info.text = "Calibration du capteur… ne bougez pas"
+        val restart = {
+            Thread {
+                val msg = try {
+                    val r = com.macam.calib.CalibrationRunner(this) { s -> runOnUiThread { info.text = s } }.run()
+                    prefs.edit().putLong("calibratedAt", System.currentTimeMillis()).apply()
+                    "✓ Capteur calibré (${r.sumOf { it.hotPixels.size }} pixels défectueux corrigés)"
+                } catch (e: Exception) { e.message ?: "Calibration interrompue" }
+                runOnUiThread { calibrating = false; info.text = msg; if (resumed) startCamera() }
+            }.start()
+        }
+        val c = cam; val p = photo
+        cam = null; photo = null
+        when { c != null -> c.release { restart() }; p != null -> p.release { restart() }; else -> restart() }
+    }
+
     override fun onPause() {
+        getSystemService(android.hardware.SensorManager::class.java).unregisterListener(faceDown)
         resumed = false
         blurHandler.removeCallbacks(blurTick)
         orientationListener.disable()

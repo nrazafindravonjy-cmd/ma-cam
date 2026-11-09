@@ -216,6 +216,7 @@ struct Engine {
     std::vector<float> shading;
     // Pixels défectueux connus (calibration personnelle) : indices dans la mosaïque.
     std::vector<uint8_t> hotMask;
+    std::vector<int> hotList;
 
     /** Gain de vignetage au photosite (x, y), interpolé bilinéairement sur la grille. */
     float shadingGain(int x, int y) const {
@@ -593,6 +594,20 @@ JNIEXPORT void JNICALL Java_com_macam_photo_Engine_nAddRaw(JNIEnv* env, jclass, 
     auto* src = static_cast<uint8_t*>(env->GetDirectBufferAddress(buf));
     std::vector<uint16_t> frame((size_t)e->W * e->H);
     for (int y = 0; y < e->H; y++) std::memcpy(&frame[(size_t)y * e->W], src + (size_t)y * rowStride, (size_t)e->W * 2);
+    // Pixels défectueux connus (calibration) : remplacés par la moyenne des voisins de même couleur.
+    for (int idx : e->hotList) {
+        int x = idx % e->W, y = idx / e->W;
+        int sum = 0, n = 0;
+        const int d[4][2] = {{-2, 0}, {2, 0}, {0, -2}, {0, 2}};
+        for (auto& o : d) {
+            int xx = x + o[0], yy = y + o[1];
+            if (xx < 0 || yy < 0 || xx >= e->W || yy >= e->H) continue;
+            size_t j = (size_t)yy * e->W + xx;
+            if (!e->hotMask.empty() && e->hotMask[j]) continue;
+            sum += frame[j]; n++;
+        }
+        if (n) frame[idx] = (uint16_t)(sum / n);
+    }
     if (e->frames == 0) {
         e->ref = std::move(frame);
         e->refPyr = buildPyramid(grayFromRaw(e->ref.data(), e->W, e->H));
@@ -759,6 +774,18 @@ JNIEXPORT void JNICALL Java_com_macam_photo_Engine_nSetShading(JNIEnv* env, jcla
     e->shRows = rows; e->shCols = cols;
     e->shading.resize((size_t)rows * cols * 4);
     env->GetFloatArrayRegion(gains, 0, rows * cols * 4, e->shading.data());
+}
+
+/** Pixels défectueux mesurés par la calibration personnelle (indices dans la mosaïque). */
+JNIEXPORT void JNICALL Java_com_macam_photo_Engine_nSetHotPixels(JNIEnv* env, jclass, jlong h, jintArray idx) {
+    auto* e = reinterpret_cast<Engine*>(h);
+    jsize n = env->GetArrayLength(idx);
+    e->hotList.resize(n);
+    env->GetIntArrayRegion(idx, 0, n, e->hotList.data());
+    e->hotMask.assign((size_t)e->W * e->H, 0);
+    for (int i : e->hotList) if (i >= 0 && (size_t)i < e->hotMask.size()) e->hotMask[i] = 1;
+    e->hotList.erase(std::remove_if(e->hotList.begin(), e->hotList.end(),
+        [&](int i) { return i < 0 || (size_t)i >= e->hotMask.size(); }), e->hotList.end());
 }
 
 JNIEXPORT void JNICALL Java_com_macam_photo_Engine_nRelease(JNIEnv*, jclass, jlong h) {
