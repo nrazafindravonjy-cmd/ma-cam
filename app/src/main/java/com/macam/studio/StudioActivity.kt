@@ -44,6 +44,10 @@ class StudioActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var go: Button
     private lateinit var pickBtn: Button
+    private lateinit var multiInfo: TextView
+    private lateinit var multiGo: Button
+    /** Vidéos multicam et leur coupe de début (µs) pour commencer toutes au même instant. */
+    private var multi: List<Pair<Uri, Long>> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -114,6 +118,27 @@ class StudioActivity : Activity() {
                 addView(go, LinearLayout.LayoutParams(MATCH_PARENT, 56.dp).apply { topMargin = 18.dp })
                 addView(progress, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = 14.dp })
                 addView(status)
+                addView(TextView(context).apply { text = "MULTICAM"; textSize = 12f; letterSpacing = 0.2f; setTextColor(accent); setPadding(6.dp, 28.dp, 0, 10.dp) })
+                addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(20.dp, 18.dp, 20.dp, 18.dp)
+                    background = glass(30, 0x26FFFFFF)
+                    addView(TextView(context).apply {
+                        text = "Plusieurs téléphones, même scène (iPhone compris) : Ma Cam aligne les vidéos sur leur son, " +
+                            "puis exporte des copies qui commencent au même instant, à l'image près."
+                        textSize = 13f; setTextColor(0xCCFFFFFF.toInt())
+                    })
+                    addView(chip("Synchroniser des vidéos…", false) { pickMulti() }.apply {
+                        layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, 42.dp).apply { topMargin = 12.dp }
+                    })
+                    multiInfo = TextView(context).apply { textSize = 13f; setTextColor(Color.WHITE); setPadding(4.dp, 10.dp, 0, 0) }
+                    addView(multiInfo)
+                    multiGo = chip("Exporter synchronisées", true) { exportMulti() }.apply {
+                        visibility = View.GONE
+                        layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, 42.dp).apply { topMargin = 10.dp }
+                    }
+                    addView(multiGo)
+                })
             })
         })
         refresh()
@@ -153,9 +178,70 @@ class StudioActivity : Activity() {
         addCategory(Intent.CATEGORY_OPENABLE); type = "*/*"
     }, REQ_LUT)
 
+    private fun pickMulti() = startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE); type = "video/*"; putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+    }, REQ_MULTI)
+
+    /** Aligne toutes les vidéos sur la première par leur son, puis calcule la coupe de chacune. */
+    private fun syncMulti(uris: List<Uri>) {
+        if (uris.size < 2) { multiInfo.text = "Choisissez au moins 2 vidéos."; return }
+        multiInfo.text = "Analyse du son de ${uris.size} vidéos…"; multiGo.visibility = View.GONE
+        Thread {
+            val text = try {
+                val envs = uris.mapIndexed { i, u ->
+                    runOnUiThread { multiInfo.text = "Analyse du son ${i + 1}/${uris.size}…" }
+                    val (pcm, rate) = MultiCam.decodeAudio(this, u) ?: throw IllegalStateException("${displayName(u)} n'a pas de son")
+                    AudioSync.envelope(pcm, rate)
+                }
+                // Début de chaque vidéo sur la ligne de temps de la première (ms), corrigé de l'écart audio/vidéo du fichier.
+                val matches = envs.map { AudioSync.align(envs[0], it) }
+                val starts = uris.indices.map { i -> matches[i].offsetMs + MultiCam.firstVideoUs(this, uris[i]) / 1000 }
+                val common = starts.max()
+                multi = uris.indices.map { i -> uris[i] to (common - starts[i]) * 1000L }
+                runOnUiThread { multiGo.visibility = View.VISIBLE }
+                uris.indices.joinToString("\n") { i ->
+                    val m = matches[i]
+                    val conf = if (i == 0) "référence" else if (m.confidence < 0.15f) "⚠ correspondance faible" else "fiable"
+                    "${displayName(uris[i])} : coupe ${"%.3f".format(java.util.Locale.US, (common - starts[i]) / 1000.0)} s ($conf)"
+                }
+            } catch (e: Exception) { "Synchronisation impossible : ${e.message}" }
+            runOnUiThread { multiInfo.text = text }
+        }.start()
+    }
+
+    /** Exporte chaque vidéo coupée au même instant, avec le débruitage et le look choisis (et sa stabilisation si possible). */
+    private fun exportMulti() {
+        val items = multi.ifEmpty { return }
+        multiGo.isEnabled = false
+        Thread {
+            val done = ArrayList<String>()
+            items.forEachIndexed { i, (u, trim) ->
+                val name = displayName(u).substringBeforeLast('.')
+                val g = if (stab > 0) gyroFor(name) else null
+                val opts = VideoStudio.Options(stabilize = g != null, smoothingS = if (stab == 2) 1.2 else 0.5,
+                    zoom = if (stab == 2) 1.15 else 1.08, denoise = when (denoise) { 1 -> 0.45f; 2 -> 0.75f; else -> 0f },
+                    lut = lut, trimStartUs = trim)
+                runCatching {
+                    VideoStudio(this).process(u, g, opts, "${name}_sync") { f ->
+                        runOnUiThread { multiInfo.text = "Export ${i + 1}/${items.size} · ${(f * 100).toInt()} %" }
+                    }
+                }.onSuccess { done += "${name}_sync.mp4" }
+            }
+            runOnUiThread {
+                multiGo.isEnabled = true
+                multiInfo.text = "✓ ${done.size}/${items.size} vidéos synchronisées dans DCIM/MaCam :\n" + done.joinToString("\n") +
+                    "\nPosez-les toutes au même point de départ dans votre logiciel de montage."
+            }
+        }.start()
+    }
+
     @Deprecated("API Activity simple, sans dépendance AndroidX")
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         super.onActivityResult(req, res, data)
+        if (req == REQ_MULTI && data != null) {
+            val uris = data.clipData?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).uri } } ?: listOfNotNull(data.data)
+            return syncMulti(uris)
+        }
         val uri = data?.data ?: return
         when (req) {
             REQ_VIDEO -> load(uri)
@@ -175,8 +261,15 @@ class StudioActivity : Activity() {
     private fun load(uri: Uri) {
         video = uri
         videoName = displayName(uri)
-        gyro = runCatching {
-            val gcsv = videoName.substringBeforeLast('.') + ".gcsv"
+        gyro = gyroFor(videoName.substringBeforeLast('.'))
+        stab = if (gyro != null) maxOf(stab, 1) else 0
+        status.text = ""
+        refresh()
+    }
+
+    /** Journal gyroscope de la vidéo [base] (même nom, dans Download/MaCam), s'il existe. */
+    private fun gyroFor(base: String): GyroLog? = runCatching {
+            val gcsv = "$base.gcsv"
             contentResolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.MediaColumns._ID),
                 "${MediaStore.MediaColumns.DISPLAY_NAME} = ?", arrayOf(gcsv), null)?.use { c ->
                 if (!c.moveToFirst()) null else {
@@ -185,10 +278,6 @@ class StudioActivity : Activity() {
                 }
             }
         }.getOrNull()
-        stab = if (gyro != null) maxOf(stab, 1) else 0
-        status.text = ""
-        refresh()
-    }
 
     // ------------------------------------------------------------------ traitement
 
@@ -240,5 +329,6 @@ class StudioActivity : Activity() {
     companion object {
         private const val REQ_VIDEO = 1
         private const val REQ_LUT = 2
+        private const val REQ_MULTI = 3
     }
 }

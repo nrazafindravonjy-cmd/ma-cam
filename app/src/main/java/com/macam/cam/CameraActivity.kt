@@ -337,6 +337,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var hdrBtn: Button
     private lateinit var authBtn: Button
     private lateinit var styleBtn: Button
+    private lateinit var clapBtn: Button
     private lateinit var stabBar: View
     private lateinit var stabFill: View
     private var stabMeter: StabilityMeter? = null
@@ -396,7 +397,11 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         falseBtn = chip("Couleurs", R.drawable.ic_falsecolor) { cam?.let { it.tools.falseColor = !it.tools.falseColor; it.applySettings() }; refreshButtons() }
         flatBtn = chip("Profil Log", R.drawable.ic_flat) { cam?.let { it.settings.flat = !it.settings.flat; it.applySettings() }; refreshButtons() }
         val studioBtn = chip("Atelier", R.drawable.ic_studio) { openStudio(null) }
-        toolsRow = row().apply { listOf(studioBtn, zebraBtn, peakBtn, falseBtn, flatBtn, gyroBtn).forEach { addView(it) } }
+        clapBtn = chip("Clap", R.drawable.ic_clap) {
+            cam?.let { it.settings.syncClap = !it.settings.syncClap; if (it.settings.syncClap) info.text = "Clap sonore au début de chaque vidéo (synchro multicam)" }
+            refreshButtons()
+        }
+        toolsRow = row().apply { listOf(studioBtn, zebraBtn, peakBtn, falseBtn, flatBtn, gyroBtn, clapBtn).forEach { addView(it) } }
         dngBtn = chip("RAW", R.drawable.ic_raw) { photo?.let { it.saveDng = !it.saveDng }; refreshButtons() }
         styleBtn = chip("Mon style", R.drawable.ic_flat) {
             com.macam.Pro.gate(this, "Style personnel") {
@@ -548,7 +553,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         layoutPreview(if (t == Tab.VIDEO) Size(1920, 1080) else Size(1440, 1080))
         overlay.scaleType = ImageView.ScaleType.CENTER_CROP
         overlay.setImageBitmap(scene)
-        settingsOpen = t == Tab.VIDEO
+        settingsOpen = t == Tab.VIDEO || t == Tab.PHOTO
         // Sans caméra, le flou part de l'image d'exemple (même cadrage que l'aperçu).
         val pw = resources.displayMetrics.widthPixels
         val ph = pw * (if (t == Tab.VIDEO) 1920 else 1440) / 1080
@@ -953,6 +958,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         infoGlass.tint = if (cam?.recording == true) 0xB3C62828.toInt() else 0x40101418
         val c = cam ?: run { setStabilityMeter(false); return }
         setStabilityMeter(c.settings.gyroLog)
+        clapBtn.selected(c.settings.syncClap)
         hdrBtn.selected(c.mode.tenBit); hdrBtn.isEnabled = c.lens.supports(twin(c.mode)) || c.mode.tenBit
         zebraBtn.selected(c.tools.zebra); peakBtn.selected(c.tools.peaking); falseBtn.selected(c.tools.falseColor)
         flatBtn.selected(c.settings.flat); flatBtn.isEnabled = !c.mode.tenBit && !c.mode.highSpeed

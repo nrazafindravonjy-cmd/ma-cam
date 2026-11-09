@@ -2,6 +2,24 @@
 
 Application caméra Android qui améliore la photo et la vidéo par traitement logiciel.
 
+## Barrières d'entrée et innovations (v0.15)
+
+- **Zéro délai** : en Photo, un anneau garde en permanence les dernières images du capteur ; la rafale fusionnée
+  correspond à l'instant de l'appui.
+- **Vignetage corrigé** (carte du capteur appliquée aux RAW), **inventaire des objectifs en cache**, mesure du temps
+  de démarrage, **compatibilité auto-réparée** (`Quirks`), **détecteur de blocage (ANR)**.
+- **Confidentialité vérifiable** : aucune permission Internet (voir `PRIVACY.md`).
+- **Ma Cam Pro** (achat unique Google Play) : Atelier, authenticité, calibration, style personnel.
+- **Calibration personnelle du capteur** : noir, bruit de lecture par ISO et pixels défectueux mesurés sur images
+  noires (téléphone face contre la table, ou depuis le Diagnostic).
+- **Authenticité C2PA** : JPEG signés par une clé de la puce sécurisée (StrongBox), attestation matérielle Android,
+  empreinte du mouvement de la main ; bibliothèque officielle `c2pa-android`.
+- **Fusion de deux objectifs** : ultra grand-angle + principal capturés au même instant, centre remplacé par le principal.
+- **Jauge de stabilité** en direct pour la stabilisation de l'Atelier.
+- **Style personnel** appris de retouches Lightroom (.xmp), appliqué comme table de couleurs 3D.
+- **Multicam par le son** : synchronisation de vidéos de plusieurs téléphones (iPhone compris) et export coupé à
+  l'image près ; clap sonore facultatif au début des enregistrements.
+
 ## Atelier vidéo (v0.10)
 
 Post-traitement sur le téléphone (`app/src/main/java/com/macam/studio/`) : décodage, trois passes GPU

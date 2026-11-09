@@ -108,6 +108,8 @@ data class Settings(
     var gyroLog: Boolean = false,
     /** Zoom numérique (pincement), 1 = aucun. */
     var zoom: Float = 1f,
+    /** Clap sonore au début de l'enregistrement (repère pour la synchronisation multicam). */
+    var syncClap: Boolean = false,
     /** Courbe plate type « log » (modes SDR uniquement). */
     var flat: Boolean = false,
 )
@@ -418,6 +420,7 @@ class CameraController(
             recorder = r
             if (settings.gyroLog && gyro.available) gyro.start()
             applySettingsInternal() // ajoute l'encodeur aux cibles : démarrage immédiat
+            if (settings.syncClap) handler.postDelayed({ playClap() }, 400)
             done(true)
         } catch (e: Exception) {
             // Nettoie le fichier à moitié créé et prépare un nouvel encodeur.
@@ -426,6 +429,18 @@ class CameraController(
             configure()
             onError("Enregistrement impossible : ${e.message}"); done(false)
         }
+    }
+
+    /** Joue le clap (50 ms, 2→4 kHz) : les autres téléphones l'enregistrent aussi, quelle que soit leur appli. */
+    private fun playClap() = runCatching {
+        val pcm = com.macam.studio.AudioSync.clap()
+        val t = android.media.AudioTrack.Builder()
+            .setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA).build())
+            .setAudioFormat(android.media.AudioFormat.Builder().setSampleRate(48_000).setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO).build())
+            .setTransferMode(android.media.AudioTrack.MODE_STATIC).setBufferSizeInBytes(pcm.size * 2).build()
+        t.write(pcm, 0, pcm.size); t.play()
+        handler.postDelayed({ t.release() }, 500)
     }
 
     /** Arrête l'enregistrement ; [done] reçoit un résumé une fois le fichier publié. */

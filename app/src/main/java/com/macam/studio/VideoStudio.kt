@@ -29,6 +29,8 @@ class VideoStudio(private val ctx: Context) {
         /** Force du débruitage temporel, 0 (aucun) à 0.85. */
         val denoise: Float = 0f,
         val lut: Lut? = null,
+        /** Début coupé (µs depuis la première image) : synchronisation multicam à l'image près. */
+        val trimStartUs: Long = 0,
     )
 
     @Volatile var cancelled = false
@@ -151,7 +153,10 @@ class VideoStudio(private val ctx: Context) {
                 }
                 val oi = dec.dequeueOutputBuffer(info, 10_000)
                 if (oi >= 0) {
-                    val render = info.size > 0
+                    val pts = info.presentationTimeUs
+                    if (firstPts < 0 && info.size > 0) firstPts = pts
+                    // Images avant le point de synchronisation : décodées mais ni affichées ni encodées.
+                    val render = info.size > 0 && pts - firstPts >= opts.trimStartUs
                     dec.releaseOutputBuffer(oi, render)
                     if (render) {
                         synchronized(frameLock) {
@@ -160,12 +165,11 @@ class VideoStudio(private val ctx: Context) {
                             frameReady = false
                         }
                         st.updateTexImage()
-                        if (firstPts < 0) firstPts = info.presentationTimeUs
                         val tMs = (info.presentationTimeUs - firstPts) / 1000.0
                         val hTop = stab?.homography(tMs, fPx, w, h)
                         val hBot = stab?.homography(tMs + readoutMs, fPx, w, h)
                         gl.draw(st, hTop, hBot, opts.denoise)
-                        EGLExt.eglPresentationTimeANDROID(egl.display, egl.surface, info.presentationTimeUs * 1000)
+                        EGLExt.eglPresentationTimeANDROID(egl.display, egl.surface, (pts - firstPts - opts.trimStartUs) * 1000)
                         egl.swap()
                         drainEncoder(false)
                         progress((info.presentationTimeUs.toFloat() / durUs).coerceIn(0f, 0.98f))
@@ -180,9 +184,11 @@ class VideoStudio(private val ctx: Context) {
             if (aIdx != null && aTrack >= 0) {
                 val ax = MediaExtractor().apply { setDataSource(pfdIn.fileDescriptor); selectTrack(aIdx) }
                 val buf = ByteBuffer.allocate(1 shl 20); val ai = MediaCodec.BufferInfo()
+                val start = maxOf(firstPts, 0) + opts.trimStartUs // même origine que la vidéo
                 while (true) {
                     val n = ax.readSampleData(buf, 0); if (n < 0) break
-                    ai.set(0, n, ax.sampleTime, if (ax.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
+                    if (ax.sampleTime < start) { ax.advance(); continue }
+                    ai.set(0, n, ax.sampleTime - start, if (ax.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
                     mux.writeSampleData(aTrack, buf, ai); ax.advance()
                 }
                 ax.release()
