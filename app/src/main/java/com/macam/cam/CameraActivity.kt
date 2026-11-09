@@ -103,6 +103,8 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         installCrashLog()
+        Quirks.init(this)
+        com.macam.Pro.init(this)
         // Mémoire : on rouvre le dernier mode et l'état du panneau de réglages.
         tab = runCatching { Tab.valueOf(prefs.getString("tab", "PHOTO")!!) }.getOrDefault(Tab.PHOTO)
         settingsOpen = prefs.getBoolean("settingsOpen", false)
@@ -164,6 +166,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
                 onInfo = { i -> runOnUiThread { showInfo(i) } },
                 onError = toast,
                 onOverlay = { bmp -> runOnUiThread { showOverlay(bmp) } })
+            cam!!.onFirstFrame = ::recordStartup
             cam!!.start()
         } else {
             val mode = when (tab) { Tab.NIGHT -> PhotoMode.NIGHT; Tab.PORTRAIT -> PhotoMode.PORTRAIT; else -> PhotoMode.PHOTO }
@@ -171,6 +174,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
                 onStatus = { t -> runOnUiThread { info.text = t; refreshButtons() } },
                 onError = toast)
             photo!!.onSaved = { uri -> runOnUiThread { showThumbnail(uri) } }
+            photo!!.onFirstFrame = ::recordStartup
             photo!!.onProgress = { f -> runOnUiThread { progress = f; styleShutter() } }
             photo!!.start(m = mode)
             showOverlay(null)
@@ -609,7 +613,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     }
 
     /** Atelier : stabilisation, débruitage et looks après le tournage. */
-    private fun openStudio(video: android.net.Uri?) {
+    private fun openStudio(video: android.net.Uri?) = com.macam.Pro.gate(this, "Atelier") {
         startActivity(Intent(this, com.macam.studio.StudioActivity::class.java).apply {
             data = video; addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         })
@@ -927,7 +931,45 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
 
     private val crashFile get() = java.io.File(filesDir, "crash.txt")
 
+    /** Temps entre le lancement du processus et la première image (barrière : < 1 s). */
+    private fun recordStartup() {
+        if (startupRecorded) return
+        startupRecorded = true
+        val ms = android.os.SystemClock.uptimeMillis() - android.os.Process.getStartUptimeMillis()
+        val hist = (prefs.getString("startupMs", "") ?: "").split(',').filter { it.isNotBlank() }.takeLast(9) + ms.toString()
+        prefs.edit().putString("startupMs", hist.joinToString(",")).apply()
+    }
+    private var startupRecorded = false
+
+    private companion object { @Volatile var watchdogStarted = false }
+
+    /**
+     * Détecteur de blocage (ANR) : si le fil principal ne répond plus pendant 5 s, sa pile d'appels est
+     * enregistrée et affichée au lancement suivant, comme un plantage.
+     */
+    private fun startAnrWatchdog() {
+        if (watchdogStarted) return
+        watchdogStarted = true
+        val main = android.os.Handler(mainLooper)
+        Thread({
+            var tick = 0L
+            while (true) {
+                val seen = java.util.concurrent.atomic.AtomicLong(-1)
+                val sent = ++tick
+                main.post { seen.set(sent) }
+                Thread.sleep(5000)
+                if (seen.get() != sent && !isFinishing) {
+                    runCatching {
+                        crashFile.writeText("BLOCAGE (ANR) > 5 s | Ma Cam ${packageManager.getPackageInfo(packageName, 0).versionName} | " +
+                            "${android.os.Build.MODEL}\n" + mainLooper.thread.stackTrace.joinToString("\n") { "\tat $it" })
+                    }
+                }
+            }
+        }, "anr-watchdog").apply { isDaemon = true; start() }
+    }
+
     private fun installCrashLog() {
+        startAnrWatchdog()
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
             runCatching {

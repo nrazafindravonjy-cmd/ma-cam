@@ -211,6 +211,26 @@ struct Engine {
     int OW = 0, OH = 0;
     std::vector<float> srAcc[3], srW[3];
     float yuvNoiseVar = 4;
+    // Carte de correction du vignetage fournie par le capteur (gains R, Gpair, Gimpair, B par point de grille).
+    int shRows = 0, shCols = 0;
+    std::vector<float> shading;
+    // Pixels défectueux connus (calibration personnelle) : indices dans la mosaïque.
+    std::vector<uint8_t> hotMask;
+
+    /** Gain de vignetage au photosite (x, y), interpolé bilinéairement sur la grille. */
+    float shadingGain(int x, int y) const {
+        if (shading.empty()) return 1.f;
+        float gx = (x + 0.5f) / W * (shCols - 1), gy = (y + 0.5f) / H * (shRows - 1);
+        int x0 = clampi((int)gx, 0, shCols - 2), y0 = clampi((int)gy, 0, shRows - 2);
+        float fx = clampf(gx - x0, 0, 1), fy = clampf(gy - y0, 0, 1);
+        int c = colorAt(x, y);
+        // Canal de la carte : R=0, B=3, vert = moyenne des deux verts.
+        auto at = [&](int cx, int cy) {
+            const float* g = &shading[((size_t)cy * shCols + cx) * 4];
+            return c == 0 ? g[0] : c == 2 ? g[3] : 0.5f * (g[1] + g[2]);
+        };
+        return (at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx) * (1 - fy) + (at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx) * fy;
+    }
 
     // Couleur du photosite (x, y) : 0 = R, 1 = G, 2 = B.
     int colorAt(int x, int y) const {
@@ -344,7 +364,7 @@ void splatSr(Engine& e, const uint16_t* raw, const Grid* g, bool isRef) {
                     }
                     int c = e.colorAt(x, y);
                     int bi = (y & 1) * 2 + (x & 1);
-                    float v = ((float)raw[(size_t)y * e.W + x] - e.black[bi]) / range[bi];
+                    float v = ((float)raw[(size_t)y * e.W + x] - e.black[bi]) / range[bi] * e.shadingGain(x, y);
                     float rx = x - ox, ry = y - oy; // position dans la référence
                     float s = sigma[c], rad = 2.f * s;
                     int u0 = (int)std::ceil((rx - rad - e.cx + 0.5f) * e.scale - 0.5f);
@@ -673,7 +693,7 @@ JNIEXPORT jboolean JNICALL Java_com_macam_photo_Engine_nRender(JNIEnv* env, jcla
                 size_t i = (size_t)y * W + x;
                 float v = e->wsum[i] > 1e-4f ? e->acc[i] / e->wsum[i] : e->ref[i];
                 float b = e->blackAt(x, y);
-                raw[i] = std::max(0.f, (v - b) / (e->white - b));
+                raw[i] = std::max(0.f, (v - b) / (e->white - b) * e->shadingGain(x, y));
             }
         });
         std::vector<float>().swap(e->acc); std::vector<float>().swap(e->wsum);
@@ -730,6 +750,15 @@ JNIEXPORT jboolean JNICALL Java_com_macam_photo_Engine_nRender(JNIEnv* env, jcla
     AndroidBitmap_unlockPixels(env, bitmap);
     LOG("rendu %dx%d à partir de %d images", W, H, e->frames);
     return JNI_TRUE;
+}
+
+/** Carte de vignetage du capteur : rows × cols points, 4 gains chacun (R, Gpair, Gimpair, B). */
+JNIEXPORT void JNICALL Java_com_macam_photo_Engine_nSetShading(JNIEnv* env, jclass, jlong h, jfloatArray gains, jint rows, jint cols) {
+    auto* e = reinterpret_cast<Engine*>(h);
+    if (rows < 2 || cols < 2) return;
+    e->shRows = rows; e->shCols = cols;
+    e->shading.resize((size_t)rows * cols * 4);
+    env->GetFloatArrayRegion(gains, 0, rows * cols * 4, e->shading.data());
 }
 
 JNIEXPORT void JNICALL Java_com_macam_photo_Engine_nRelease(JNIEnv*, jclass, jlong h) {

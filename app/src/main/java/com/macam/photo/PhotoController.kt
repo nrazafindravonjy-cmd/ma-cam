@@ -91,9 +91,17 @@ class PhotoController(
     }
 
     @Volatile private var closed: CountDownLatch? = null
+
+    // ---- Zéro délai (ZSL) : les dernières images du capteur sont gardées en mémoire en permanence.
+    /** Actif en mode Photo : la rafale est déjà prise au moment de l'appui. */
+    private val zsl get() = mode == PhotoMode.PHOTO
+    private val zslDepth get() = profile.frames(false)
+    private val ring = ArrayDeque<android.media.Image>()
+    private val ringResults = LinkedHashMap<Long, TotalCaptureResult>()
     private var configureAttempt = 0
 
     private fun close() {
+        clearRing()
         runCatching { session?.close() }; session = null
         runCatching { extSession?.close() }; extSession = null
         device?.let { closed = CountDownLatch(1); runCatching { it.close() } }
@@ -167,7 +175,8 @@ class PhotoController(
 
     private fun configure(d: CameraDevice) {
         val (fmt, size) = captureSize()
-        val r = ImageReader.newInstance(size.width, size.height, fmt, 3)
+        // En ZSL, le lecteur garde zslDepth images + 2 de marge pour que le capteur ne se bloque jamais.
+        val r = ImageReader.newInstance(size.width, size.height, fmt, if (zsl) zslDepth + 2 else 3)
         reader = r
         val pv = previewSurface(previewSize()); preview = pv
         if (!pv.isValid) return onError("Aperçu indisponible, réessayez")
@@ -222,15 +231,68 @@ class PhotoController(
     }
 
     private fun startPreview() {
-        val s = session ?: return; val d = device ?: return
-        s.setRepeatingRequest(previewRequest(d).build(), object : CameraCaptureSession.CaptureCallback() {
-            override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, res: TotalCaptureResult) { last = res }
+        val s = session ?: return; val d = device ?: return; val r = reader
+        val req = previewRequest(d)
+        if (zsl && r != null) {
+            req.addTarget(r.surface)
+            if (r.imageFormat == ImageFormat.RAW_SENSOR)
+                req.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
+            // Anneau d'images : on garde les plus récentes, on rend les plus anciennes au capteur.
+            r.setOnImageAvailableListener({ rd ->
+                val img = runCatching { rd.acquireNextImage() }.getOrNull() ?: return@setOnImageAvailableListener
+                ring.addLast(img)
+                while (ring.size > zslDepth) ring.removeFirst().close()
+            }, handler)
+        }
+        s.setRepeatingRequest(req.build(), object : CameraCaptureSession.CaptureCallback() {
+            override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, res: TotalCaptureResult) {
+                last = res
+                if (zsl) {
+                    res.get(CaptureResult.SENSOR_TIMESTAMP)?.let { ringResults[it] = res }
+                    while (ringResults.size > zslDepth * 3) ringResults.remove(ringResults.keys.first())
+                }
+                if (!firstFrameSeen) { firstFrameSeen = true; onFirstFrame() }
+            }
         }, handler)
+    }
+
+    private fun clearRing() { while (ring.isNotEmpty()) ring.removeFirst().close(); ringResults.clear() }
+
+    /** Appelé à la première image affichée (mesure du temps de démarrage). */
+    var onFirstFrame: () -> Unit = {}
+    private var firstFrameSeen = false
+
+    /**
+     * Capture sans délai : les images de l'anneau, prises juste avant l'appui, forment la rafale.
+     * La plus récente (la plus proche de l'appui) sert de référence.
+     */
+    private fun captureZsl(rotation: Int, name: String) {
+        val frames = ArrayList<Pair<Frame, TotalCaptureResult?>>()
+        while (ring.isNotEmpty()) {
+            val img = ring.removeLast()
+            val ts = img.timestamp
+            frames += Frame.copy(img) to ringResults[ts]
+            img.close()
+        }
+        val ref = frames.firstOrNull { it.second != null }?.second ?: (last as? TotalCaptureResult)
+        val p = Plan(frames.size, ref?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0, ref?.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0,
+            manual = false, label = "HDR+", zsl = true)
+        onStatus("HDR+ · ${frames.size} images")
+        onProgress(0f)
+        val job = BurstJob(frames.size)
+        currentJob = job
+        job.onDone = { engine, result ->
+            try { finishAndSave(engine, result, name, rotation, p) }
+            catch (e: Throwable) { onError("Traitement impossible : ${e.message}") }
+            finally { engine.close(); busy = false; onProgress(-1f); if (currentJob == job) currentJob = null }
+        }
+        val latch = CountDownLatch(0)
+        for ((f, _) in frames) worker.execute { job.add(f, latch) { ref } }
     }
 
     // ------------------------------------------------------------------ capture multi-images
 
-    private data class Plan(val frames: Int, val exposureNs: Long, val iso: Int, val manual: Boolean, val label: String)
+    private data class Plan(val frames: Int, val exposureNs: Long, val iso: Int, val manual: Boolean, val label: String, val zsl: Boolean = false)
 
     /** Choisit nombre d'images, temps de pose et ISO selon la scène et le tremblement mesuré. */
     private fun plan(): Plan {
@@ -275,9 +337,10 @@ class PhotoController(
         if (mode == PhotoMode.PORTRAIT) return@post capturePortrait(deviceOrientation)
         val s = session ?: return@post; val d = device ?: return@post; val r = reader ?: return@post
         busy = true
-        val p = plan()
         val rotation = jpegRotation(deviceOrientation)
         val name = "MaCam_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        if (zsl && ring.size >= 2) return@post captureZsl(rotation, name)
+        val p = plan()
         val total = p.exposureNs * p.frames / 1e9
         onStatus(if (total > 1.5) "${p.label} · ne bougez pas · %.0f s".format(total) else "${p.label} · ${p.frames} images")
         onProgress(0f)
@@ -322,6 +385,8 @@ class PhotoController(
                 if (lens.hasOis) set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
                 if (superRes && Build.VERSION.SDK_INT >= 30) set(CaptureRequest.CONTROL_ZOOM_RATIO, 2f)
                 set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                if (r.imageFormat == ImageFormat.RAW_SENSOR)
+                    set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
                 val focus = last?.get(CaptureResult.LENS_FOCUS_DISTANCE)
                 if (!lens.fixedFocus && focus != null) {
                     set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
@@ -420,6 +485,17 @@ class PhotoController(
             val ns = noise?.map { it.first }?.average()?.toFloat() ?: 1e-4f
             val no = noise?.map { it.second }?.average()?.toFloat() ?: 1e-6f
             val night = mode == PhotoMode.NIGHT
+            return createEngineFor(f, cfa, black, white, ns, no, night).also { e ->
+                // Correction du vignetage fournie par le capteur (les RAW ne sont pas corrigés).
+                res?.get(CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP)?.let { m ->
+                    val g = FloatArray(m.rowCount * m.columnCount * 4)
+                    m.copyGainFactors(g, 0)
+                    e.setShading(g, m.rowCount, m.columnCount)
+                }
+            }
+        }
+
+        private fun createEngineFor(f: Frame, cfa: Int, black: FloatArray, white: Float, ns: Float, no: Float, night: Boolean): Engine {
             return when {
                 f.fmt != ImageFormat.RAW_SENSOR -> Engine.create(Engine.Mode.YUV, f.w, f.h, 0, FloatArray(4), 255f, 0f, 0f, if (night) 10f else 6f)
                 superRes -> {
@@ -443,6 +519,8 @@ class PhotoController(
         val look = when {
             superRes -> Engine.Look(2f, 0.6f, 1.1f, 0.35f, 1f, 1.1f)
             night -> Engine.Look(1f, 0.62f, 1.05f, 0.35f, 3f, 1.05f)
+            // ZSL : images à l'exposition normale (pas de sous-exposition) → pas de gain, compression plus forte.
+            p.zsl -> Engine.Look(1f, 0.5f, 1.15f, 0.6f, 1f, 1.12f)
             else -> Engine.Look(2f, 0.55f, 1.15f, 0.6f, 1f, 1.12f)
         }
         // Copie de la mosaïque pour le DNG avant le rendu (qui libère les accumulateurs).

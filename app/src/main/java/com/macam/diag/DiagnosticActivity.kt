@@ -61,7 +61,11 @@ class DiagnosticActivity : Activity() {
                 synchronized(report) { report.appendLine(line); runCatching { file.appendText(line + "\n") } }
                 runOnUiThread { output.append(line + "\n") }
             }
-            log("Ma Cam – diagnostic v0.2 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            log("Ma Cam – diagnostic v0.3 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            val prefs = getSharedPreferences("macam", MODE_PRIVATE)
+            log("Démarrage (ms, derniers lancements) : ${prefs.getString("startupMs", "").orEmpty().ifEmpty { "pas encore mesuré" }}")
+            com.macam.cam.Quirks.init(this)
+            log("Incompatibilités apprises sur ce téléphone : ${com.macam.cam.Quirks.all().ifEmpty { listOf("aucune") }.joinToString()}")
             val cm = getSystemService(CameraManager::class.java)
             try {
                 val sb = StringBuilder(); CameraInfo.report(this, cm, sb); log(sb.toString())

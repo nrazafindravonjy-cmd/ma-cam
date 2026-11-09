@@ -15,6 +15,7 @@ class Engine private constructor(private var handle: Long) : AutoCloseable {
     fun addYuv(y: ByteBuffer, yStride: Int, u: ByteBuffer, v: ByteBuffer, uvStride: Int, uvPixelStride: Int) =
         nAddYuv(handle, y, yStride, u, v, uvStride, uvPixelStride)
     fun mergedRaw(out: ByteBuffer) = nGetMergedRaw(handle, out)
+    fun setShading(gains: FloatArray, rows: Int, cols: Int) = nSetShading(handle, gains, rows, cols)
 
     fun render(bmp: Bitmap, wb: FloatArray, ccm: FloatArray, p: Look) =
         nRender(handle, bmp, wb, ccm, p.exposure, p.compression, p.detail, p.sharpen, p.chroma, p.saturation)
@@ -45,6 +46,7 @@ class Engine private constructor(private var handle: Long) : AutoCloseable {
         @JvmStatic private external fun nGetMergedRaw(h: Long, out: ByteBuffer): Boolean
         @JvmStatic private external fun nRender(h: Long, bmp: Bitmap, wb: FloatArray, ccm: FloatArray, exposure: Float,
             compression: Float, detail: Float, sharpen: Float, chroma: Float, saturation: Float): Boolean
+        @JvmStatic private external fun nSetShading(h: Long, gains: FloatArray, rows: Int, cols: Int)
         @JvmStatic private external fun nRelease(h: Long)
     }
 }

@@ -42,7 +42,8 @@ class Lens(val id: String, val chars: CameraCharacteristics, val front: Boolean,
         }
         val fpsOk = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             ?.contains(Range(m.fps, m.fps)) == true
-        val sizeOk = map.getOutputSizes(MediaCodec::class.java)?.contains(m.size) == true
+        val sizeOk = map.getOutputSizes(MediaCodec::class.java)?.contains(m.size) == true &&
+            !Quirks.has(Quirks.badMode(id, m.name))
         val hdrOk = !m.tenBit || (Build.VERSION.SDK_INT >= 33 && chars.get(
             CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES)?.supportedProfiles
             ?.contains(DynamicRangeProfiles.HLG10) == true)
@@ -50,8 +51,12 @@ class Lens(val id: String, val chars: CameraCharacteristics, val front: Boolean,
     }
 
     companion object {
-        /** Objectifs arrière triés par focale, puis la caméra avant. */
-        fun list(cm: CameraManager): List<Lens> {
+        @Volatile private var cache: List<Lens>? = null
+
+        /** Objectifs arrière triés par focale, puis la caméra avant (mis en cache : démarrage plus rapide). */
+        fun list(cm: CameraManager): List<Lens> = cache ?: scan(cm).also { cache = it }
+
+        private fun scan(cm: CameraManager): List<Lens> {
             val back = ArrayList<Lens>(); val front = ArrayList<Lens>()
             for (id in cm.cameraIdList) {
                 val c = cm.getCameraCharacteristics(id)
@@ -213,7 +218,8 @@ class CameraController(
         settings.manualFocus = settings.manualFocus && !l.fixedFocus
         settings.zoom = 1f; meteringRegion = null
         analysisAllowed = true
-        openWithFallback(l.id, l.parentId)
+        // Objectif déjà connu comme non ouvrable directement : on passe tout de suite par la caméra logique.
+        if (Quirks.has(Quirks.noDirectOpen(l.id))) openWithFallback(l.parentId, l.parentId) else openWithFallback(l.id, l.parentId)
     }
 
     /** Certains fabricants interdisent d'ouvrir un objectif physique : on se replie sur la caméra logique. */
@@ -241,9 +247,15 @@ class CameraController(
     }
 
     private fun fallback(id: String, parent: String) =
-        if (id != parent) openWithFallback(parent, parent) else onError("Ouverture de la caméra impossible")
+        if (id != parent) { Quirks.set(Quirks.noDirectOpen(id)); openWithFallback(parent, parent) }
+        else onError("Ouverture de la caméra impossible")
 
     private var configureAttempt = 0
+
+    /** Appelé à la première session prête (mesure du temps de démarrage). */
+    var onFirstFrame: () -> Unit = {}
+    private var firstFrameSeen = false
+    private fun firstFrame() { if (!firstFrameSeen) { firstFrameSeen = true; onFirstFrame() } }
 
     /** (Re)crée la session : aperçu + encodeur préparé pour un démarrage instantané. */
     fun reconfigure() = handler.post { if (!recording) configure() }
@@ -261,7 +273,8 @@ class CameraController(
         } catch (e: Exception) { onError("Encodeur indisponible : ${e.message}"); null }
         armed = rec
         runCatching { analysis?.close() }; analysis = null
-        val an = if (analysisAllowed && !mode.highSpeed) runCatching { createAnalysisReader() }.getOrNull() else null
+        val an = if (analysisAllowed && !mode.highSpeed && !Quirks.has(Quirks.noAnalysis(lens.id, mode.tenBit)))
+            runCatching { createAnalysisReader() }.getOrNull() else null
         analysis = an
         val outs = listOfNotNull(pv, rec?.inputSurface, an?.surface).map { s ->
             OutputConfiguration(s).apply {
@@ -271,17 +284,21 @@ class CameraController(
         val type = if (mode.highSpeed) SessionConfiguration.SESSION_HIGH_SPEED else SessionConfiguration.SESSION_REGULAR
         if (!pv.isValid) { onError("Aperçu indisponible, réessayez"); return }
         try { dev.createCaptureSession(SessionConfiguration(type, outs, executor, object : CameraCaptureSession.StateCallback() {
-            override fun onConfigured(s: CameraCaptureSession) { session = s; configureAttempt = 0; applySettingsInternal() }
+            override fun onConfigured(s: CameraCaptureSession) { session = s; configureAttempt = 0; applySettingsInternal(); firstFrame() }
             override fun onConfigureFailed(s: CameraCaptureSession) {
                 when {
                     // La surface d'aperçu peut être encore libérée par la caméra précédente : on réessaie.
                     configureAttempt < 2 -> { configureAttempt++; handler.postDelayed({ configure() }, 350) }
                     an != null -> { // dernier recours : sans le flux d'analyse (outils pro indisponibles)
                         analysisAllowed = false
+                        Quirks.set(Quirks.noAnalysis(lens.id, mode.tenBit))
                         onError("Outils pro indisponibles dans ce mode")
                         configure()
                     }
-                    else -> onError("Configuration refusée pour ${mode.label} sur cet objectif")
+                    else -> {
+                        Quirks.set(Quirks.badMode(lens.id, mode.name))
+                        onError("${mode.label} indisponible sur cet objectif : désactivé à l'avenir")
+                    }
                 }
             }
         })) } catch (e: Exception) { onError("Session impossible : ${e.message}") }

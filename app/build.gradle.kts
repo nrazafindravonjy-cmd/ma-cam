@@ -29,6 +29,7 @@ android {
 }
 
 android {
+    buildFeatures { buildConfig = true }
     testOptions {
         unitTests.isIncludeAndroidResources = true
         unitTests.all {
@@ -38,7 +39,8 @@ android {
 }
 
 dependencies {
-    compileOnly("androidx.annotation:annotation:1.9.1")
+    implementation("com.android.billingclient:billing:7.1.1")
+    implementation("androidx.annotation:annotation:1.9.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
 }
