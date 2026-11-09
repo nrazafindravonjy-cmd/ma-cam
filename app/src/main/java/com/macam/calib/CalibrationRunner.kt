@@ -79,7 +79,7 @@ class CalibrationRunner(private val ctx: Context, private val onStatus: (String)
             var hot = IntArray(0)
             for (iso in isos) {
                 val frames = grab(s, d, reader, iso, 4)
-                val st = CalibrationMath.isoStats(frames, size.width, size.height, white, nominal)
+                val st = CalibrationMath.isoStats(frames, size.width, size.height, white, nominal, black[isos.first()])
                 if (st.lightLeak) throw LightLeak()
                 black[iso] = st.black; readVar[iso] = st.readVar
                 // Pixels défectueux mesurés à l'ISO le plus élevé, où ils ressortent le mieux.

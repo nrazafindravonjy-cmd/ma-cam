@@ -103,9 +103,17 @@ class PhotoController(
         // Une photo en cours de traitement est terminée avec les images déjà reçues, pas perdue.
         currentJob?.let { j -> worker.execute { j.forceComplete() } }
         close(); motion.stop()
-        closed?.await(1500, TimeUnit.MILLISECONDS)
-        done()
-        worker.shutdown(); thread.quitSafely()
+        whenClosed { done(); worker.shutdown(); thread.quitSafely() }
+    }
+
+    /**
+     * Exécute [block] une fois la caméra précédente réellement fermée (onClosed), sans bloquer le fil caméra
+     * (onClosed y est livré) ; au plus 1,5 s d'attente.
+     */
+    private fun whenClosed(waited: Int = 0, block: () -> Unit) {
+        val c = closed
+        if (c == null || c.count == 0L || waited >= 1500) block()
+        else handler.postDelayed({ whenClosed(waited + 30, block) }, 30)
     }
 
     @Volatile private var closed: CountDownLatch? = null
@@ -114,7 +122,7 @@ class PhotoController(
 
     // ---- Zéro délai (ZSL) : les dernières images du capteur sont gardées en mémoire en permanence.
     /** Actif en mode Photo : la rafale est déjà prise au moment de l'appui. */
-    private val zsl get() = mode == PhotoMode.PHOTO && !fusion
+    private val zsl get() = mode == PhotoMode.PHOTO && !fusion && profile.tier == DeviceProfile.Tier.HIGH
 
     // ---- Fusion de deux objectifs : ultra grand-angle + principal capturés au même instant (caméra logique).
     @Volatile var fusion = false; private set
@@ -145,6 +153,14 @@ class PhotoController(
     @SuppressLint("MissingPermission")
     private fun reopen(l: Lens, m: PhotoMode, sr: Boolean) {
         close()
+        // La caméra suivante ne s'ouvre qu'une fois la précédente fermée : sinon la surface d'aperçu est encore prise.
+        whenClosed { doReopen(l, m, sr) }
+    }
+
+    private var fusionAttempt = 0
+
+    @SuppressLint("MissingPermission")
+    private fun doReopen(l: Lens, m: PhotoMode, sr: Boolean) {
         lens = l; mode = m
         profile = DeviceProfile(ctx, l.chars)
         calibration = com.macam.calib.SensorCalibration.load(ctx, l.id)
@@ -161,7 +177,13 @@ class PhotoController(
     /** Repli sur la caméra logique si l'objectif physique ne peut pas être ouvert directement. */
     @SuppressLint("MissingPermission")
     private fun open(id: String, parent: String, m: PhotoMode, attempt: Int = 0) {
-        val retry = { if (id != parent) open(parent, parent, m) else onError("Ouverture de la caméra impossible") }
+        val retry = {
+            if (id != parent) {
+                // La caméra logique montre l'objectif principal : on le dit et on l'affiche comme tel.
+                if (lens.id == id && lens != Lens.main(lenses)) { lens = Lens.main(lenses); onError("Objectif indisponible : retour au principal") }
+                open(parent, parent, m)
+            } else onError("Ouverture de la caméra impossible")
+        }
         val busyRetry = { if (attempt < 5) handler.postDelayed({ open(id, parent, m, attempt + 1) }, 300) else retry() }
         try {
             cm.openCamera(id, executor, object : CameraDevice.StateCallback() {
@@ -248,10 +270,12 @@ class PhotoController(
         )
         d.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outs, executor,
             object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(s: CameraCaptureSession) { session = s; startPreview(); onStatus("Ultra grand-angle + fusion du principal") }
+                override fun onConfigured(s: CameraCaptureSession) { session = s; fusionAttempt = 0; startPreview(); onStatus("Ultra grand-angle + fusion du principal") }
                 override fun onConfigureFailed(s: CameraCaptureSession) {
-                    // Combinaison refusée par ce téléphone : retenue, puis ultra grand-angle seul.
+                    // Un échec isolé peut être passager : on réessaie une fois avant de retenir l'incompatibilité.
+                    if (fusionAttempt++ < 1) { handler.postDelayed({ reopen(lens, mode, false) }, 400); return }
                     com.macam.cam.Quirks.set("noFusion:${lens.parentId}")
+                    fusionAttempt = 0
                     handler.post { reopen(lens, mode, false) }
                 }
             }))

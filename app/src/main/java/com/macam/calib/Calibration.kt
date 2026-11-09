@@ -67,7 +67,7 @@ object CalibrationMath {
      * Statistiques d'une série d'images noires au même ISO. [white] et [nominalBlack] servent à normaliser
      * le bruit et à détecter une fuite de lumière (image pas assez noire).
      */
-    fun isoStats(frames: List<ShortArray>, w: Int, h: Int, white: Float, nominalBlack: FloatArray): IsoStats {
+    fun isoStats(frames: List<ShortArray>, w: Int, h: Int, white: Float, nominalBlack: FloatArray, referenceBlack: FloatArray? = null): IsoStats {
         val sum = DoubleArray(4); val sq = DoubleArray(4); val n = LongArray(4)
         for (f in frames) {
             var y = 0
@@ -87,7 +87,9 @@ object CalibrationMath {
         // Bruit : variance robuste par canal (les pixels chauds sont rares et pèsent peu sur la moyenne des 4 canaux).
         val varAvg = (0 until 4).map { sq[it] / n[it] - (sum[it] / n[it]).let { m -> m * m } }.sorted().let { (it[0] + it[1] + it[2] + it[3]) / 4 }
         val range = (white - nominalBlack.average()).coerceAtLeast(1.0)
-        val leak = (0 until 4).any { black[it] - nominalBlack[it] > 0.02 * range }
+        // Fuite de lumière : le niveau monte avec l'ISO (la lumière est amplifiée), pas le noir du capteur.
+        // On compare donc au noir mesuré à l'ISO le plus bas, pas au noir théorique du fabricant.
+        val leak = referenceBlack != null && (0 until 4).any { black[it] - referenceBlack[it] > 0.02 * range }
         return IsoStats(black, (varAvg / (range * range)).toFloat(), leak)
     }
 

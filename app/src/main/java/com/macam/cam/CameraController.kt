@@ -194,10 +194,14 @@ class CameraController(
      */
     fun release(done: () -> Unit = {}) {
         stop()
-        handler.post {
-            closed?.await(1500, java.util.concurrent.TimeUnit.MILLISECONDS)
-            gyro.release(); done(); thread.quitSafely()
-        }
+        handler.post { whenClosed { gyro.release(); done(); thread.quitSafely() } }
+    }
+
+    /** Exécute [block] après onClosed de la caméra précédente (livré sur ce fil, donc sans bloquer) ; 1,5 s max. */
+    private fun whenClosed(waited: Int = 0, block: () -> Unit) {
+        val c = closed
+        if (c == null || c.count == 0L || waited >= 1500) block()
+        else handler.postDelayed({ whenClosed(waited + 30, block) }, 30)
     }
 
     /** Signalé par onClosed quand le pilote a vraiment fermé la caméra. */
@@ -214,21 +218,28 @@ class CameraController(
     @SuppressLint("MissingPermission")
     private fun reopen(l: Lens, m: Mode) {
         closeDevice()
+        // On attend la fermeture réelle : une session créée trop tôt échouerait et serait retenue comme incompatible.
+        whenClosed { doReopen(l, m) }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun doReopen(l0: Lens, m: Mode) {
+        // Objectif connu comme non ouvrable : la caméra logique montre le principal, on l'utilise donc explicitement.
+        val l = if (Quirks.has(Quirks.noDirectOpen(l0.id))) Lens.main(lenses) else l0
         lens = l
         mode = if (l.supports(m)) m else Mode.entries.firstOrNull { l.supports(it) }
             ?: return onError("Aucun mode vidéo compatible avec cet objectif")
         settings.manualFocus = settings.manualFocus && !l.fixedFocus
         settings.zoom = 1f; meteringRegion = null
         analysisAllowed = true
-        // Objectif déjà connu comme non ouvrable directement : on passe tout de suite par la caméra logique.
-        if (Quirks.has(Quirks.noDirectOpen(l.id))) openWithFallback(l.parentId, l.parentId) else openWithFallback(l.id, l.parentId)
+        openWithFallback(l.id, l.parentId)
     }
 
     /** Certains fabricants interdisent d'ouvrir un objectif physique : on se replie sur la caméra logique. */
     @SuppressLint("MissingPermission")
     private fun openWithFallback(id: String, parent: String, attempt: Int = 0) {
         // Caméra encore occupée (fermeture en cours) : on réessaie le même objectif ; sinon repli sur la logique.
-        val busyRetry = { if (attempt < 5) handler.postDelayed({ openWithFallback(id, parent, attempt + 1) }, 300) else fallback(id, parent) }
+        val busyRetry = { if (attempt < 5) handler.postDelayed({ openWithFallback(id, parent, attempt + 1) }, 300) else fallback(id, parent, persist = false) }
         try {
             cm.openCamera(id, executor, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) { device = d; configureAttempt = 0; configure() }
@@ -239,18 +250,24 @@ class CameraController(
                     when {
                         device != null && device != d -> {}
                         e == ERROR_CAMERA_IN_USE || e == ERROR_MAX_CAMERAS_IN_USE -> busyRetry()
-                        device == null -> fallback(id, parent)
+                        device == null -> fallback(id, parent, persist = false)
                         else -> onError("Erreur caméra $e")
                     }
                 }
             })
         } catch (e: CameraAccessException) { busyRetry() }
-        catch (e: Exception) { fallback(id, parent) }
+        // IllegalArgumentException : identifiant refusé par le système → incompatibilité durable, retenue.
+        catch (e: Exception) { fallback(id, parent, persist = e is IllegalArgumentException) }
     }
 
-    private fun fallback(id: String, parent: String) =
-        if (id != parent) { Quirks.set(Quirks.noDirectOpen(id)); openWithFallback(parent, parent) }
-        else onError("Ouverture de la caméra impossible")
+    private fun fallback(id: String, parent: String, persist: Boolean) {
+        if (id == parent) return onError("Ouverture de la caméra impossible")
+        if (persist) Quirks.set(Quirks.noDirectOpen(id))
+        // La caméra logique montre l'objectif principal : on aligne les métadonnées et on prévient.
+        val main = Lens.main(lenses)
+        if (lens.id == id && lens != main) { lens = main; onError("Objectif indisponible : retour au principal") }
+        openWithFallback(parent, parent)
+    }
 
     private var configureAttempt = 0
 

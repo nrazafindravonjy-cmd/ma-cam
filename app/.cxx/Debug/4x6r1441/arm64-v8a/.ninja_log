@@ -5,3 +5,5 @@
 564	597	1794233000078325391	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	312533b831dfd17a
 1	2586	1794233195012478641	CMakeFiles/macam.dir/engine.cpp.o	b18c10e62882d066
 2586	2613	1794233197600478733	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	312533b831dfd17a
+3	781	1794233794268500072	CMakeFiles/macam.dir/fusion.cpp.o	185f96c0ec087bf7
+781	863	1794233795048500099	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	312533b831dfd17a

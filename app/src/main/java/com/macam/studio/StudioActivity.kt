@@ -216,13 +216,14 @@ class StudioActivity : Activity() {
         Thread {
             val done = ArrayList<String>()
             items.forEachIndexed { i, (u, trim) ->
+                if (multiCancelled) return@forEachIndexed
                 val name = displayName(u).substringBeforeLast('.')
                 val g = if (stab > 0) gyroFor(name) else null
                 val opts = VideoStudio.Options(stabilize = g != null, smoothingS = if (stab == 2) 1.2 else 0.5,
                     zoom = if (stab == 2) 1.15 else 1.08, denoise = when (denoise) { 1 -> 0.45f; 2 -> 0.75f; else -> 0f },
                     lut = lut, trimStartUs = trim)
                 runCatching {
-                    VideoStudio(this).process(u, g, opts, "${name}_sync") { f ->
+                    VideoStudio(this).also { multiStudio = it }.process(u, g, opts, "${name}_sync") { f ->
                         runOnUiThread { multiInfo.text = "Export ${i + 1}/${items.size} · ${(f * 100).toInt()} %" }
                     }
                 }.onSuccess { done += "${name}_sync.mp4" }
@@ -324,7 +325,14 @@ class StudioActivity : Activity() {
         }.start()
     }
 
-    override fun onDestroy() { studio?.cancelled = true; super.onDestroy() }
+    override fun onDestroy() {
+        studio?.cancelled = true
+        multiCancelled = true; multiStudio?.cancelled = true
+        super.onDestroy()
+    }
+
+    @Volatile private var multiCancelled = false
+    @Volatile private var multiStudio: VideoStudio? = null
 
     companion object {
         private const val REQ_VIDEO = 1

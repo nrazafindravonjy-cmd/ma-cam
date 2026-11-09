@@ -175,6 +175,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun runCalibration() {
+        if (switching || !resumed) return
         calibrating = true
         info.text = "Calibration du capteur… ne bougez pas"
         val restart = {
@@ -210,6 +211,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun startCamera() {
+        if (calibrating) return // la calibration tient la caméra ; elle relancera l'aperçu à la fin
         if (cam != null || photo != null) return
         val toast: (String) -> Unit = { e -> runOnUiThread { Toast.makeText(this, e, Toast.LENGTH_LONG).show() } }
         if (tab == Tab.VIDEO) {
@@ -341,6 +343,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var stabBar: View
     private lateinit var stabFill: View
     private var stabMeter: StabilityMeter? = null
+    private var stabKey: String? = null
     private var iconRotation = 0f
     private val prefs by lazy { getSharedPreferences("macam", MODE_PRIVATE) }
     private val blurHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -590,8 +593,12 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
 
     /** Jauge active en vidéo avec « Stab. Atelier » : vert = rattrapable, ambre = limite, rouge = trop fort. */
     private fun setStabilityMeter(on: Boolean) {
+        val key = cam?.let { "${it.lens.id}:${it.mode}" }
+        // Objectif ou mode changé : la marge dépend de la focale et de la taille d'image, on recrée la jauge.
+        if (on && stabMeter != null && key != stabKey) { stabMeter?.stop(); stabMeter = null }
         if (on && stabMeter == null && resumed) {
             val c = cam ?: return
+            stabKey = key
             stabMeter = StabilityMeter(this) { r -> runOnUiThread { showStability(r) } }.also { m ->
                 val phys = c.lens.chars.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)!!
                 val px = c.lens.chars.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)!!
@@ -1080,8 +1087,9 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
 
     /** Temps entre le lancement du processus et la première image (barrière : < 1 s). */
     private fun recordStartup() {
-        if (startupRecorded) return
-        startupRecorded = true
+        // Une seule mesure par processus : une activité recréée plus tard n'est pas un démarrage.
+        if (startupRecorded || processStartupMeasured) return
+        startupRecorded = true; processStartupMeasured = true
         val ms = android.os.SystemClock.uptimeMillis() - android.os.Process.getStartUptimeMillis()
         val hist = (prefs.getString("startupMs", "") ?: "").split(',').filter { it.isNotBlank() }.takeLast(9) + ms.toString()
         prefs.edit().putString("startupMs", hist.joinToString(",")).apply()
@@ -1090,6 +1098,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
 
     private companion object {
         @Volatile var watchdogStarted = false
+        @Volatile var processStartupMeasured = false
         const val REQ_STYLE = 41
     }
 

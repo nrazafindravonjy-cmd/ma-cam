@@ -31,8 +31,13 @@ class CalibrationMathTest {
     }
 
     @Test fun detectsLightLeak() {
-        val s = CalibrationMath.isoStats(darkFrames(2, 2.0, emptySet(), leak = 60f), w, h, 1023f, floatArrayOf(64f, 64f, 64f, 64f))
+        val nominal = floatArrayOf(64f, 64f, 64f, 64f)
+        val base = CalibrationMath.isoStats(darkFrames(2, 2.0, emptySet(), seed = 7), w, h, 1023f, nominal)
+        val s = CalibrationMath.isoStats(darkFrames(2, 2.0, emptySet(), leak = 60f), w, h, 1023f, nominal, base.black)
         assertTrue(s.lightLeak)
+        // Un noir réel éloigné du noir théorique (sans lumière) n'est pas une fuite.
+        val offset = CalibrationMath.isoStats(darkFrames(2, 2.0, emptySet(), leak = 30f, seed = 8), w, h, 1023f, nominal)
+        assertTrue(!offset.lightLeak)
     }
 
     @Test fun findsOnlyPersistentHotPixels() {

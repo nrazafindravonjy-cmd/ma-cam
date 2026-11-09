@@ -90,6 +90,8 @@ void fuse(uint8_t* base, int bw, int bh, int bstride, const uint8_t* det, int dw
                 if (c > b2) { b2 = c; rx = ox; ry = oy; }
             }
         px = rx * f2; py = ry * f2; best = b2;
+        // rw/rh impairs : rx·2 peut dépasser d'un pixel ; on garde la zone dans l'image.
+        px = std::clamp(px, 0, bw - rw); py = std::clamp(py, 0, bh - rh);
     }
     out[0] = px - (bw - rw) / 2; out[1] = py - (bh - rh) / 2; score = (float)best;
     if (best < 0.5) return; // pas de correspondance fiable : on garde l'ultra grand-angle seul
