@@ -193,6 +193,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun onPause() {
+        setStabilityMeter(false)
         getSystemService(android.hardware.SensorManager::class.java).unregisterListener(faceDown)
         resumed = false
         blurHandler.removeCallbacks(blurTick)
@@ -334,6 +335,9 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var aidsHeader: TextView
     private lateinit var hdrBtn: Button
     private lateinit var authBtn: Button
+    private lateinit var stabBar: View
+    private lateinit var stabFill: View
+    private var stabMeter: StabilityMeter? = null
     private var iconRotation = 0f
     private val prefs by lazy { getSharedPreferences("macam", MODE_PRIVATE) }
     private val blurHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -490,6 +494,13 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             addView(tabRow, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL })
         }
         panelGlass = GlassView(this, 30.dp.toFloat()).apply { addView(content) }
+        // Jauge de stabilité (Stab. Atelier) : fine barre sous l'info.
+        stabFill = View(this).apply { background = GradientDrawable().apply { cornerRadius = 3.dp.toFloat(); setColor(accent) } }
+        stabBar = FrameLayout(this).apply {
+            background = GradientDrawable().apply { cornerRadius = 3.dp.toFloat(); setColor(0x33FFFFFF) }
+            addView(stabFill, FrameLayout.LayoutParams(0, MATCH_PARENT))
+            visibility = View.GONE; contentDescription = "Stabilité"
+        }
         infoGlass = GlassView(this, 19.dp.toFloat(), tint = 0x40101418).apply { elevation = 4.dp.toFloat(); addView(info) }
         Backdrop.source = surfaceView
         installGestures()
@@ -500,6 +511,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
             addView(surfaceView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
             addView(this@CameraActivity.overlay, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER))
             addView(flash, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(stabBar, FrameLayout.LayoutParams(140.dp, 6.dp, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = 58.dp })
             addView(focusRing, FrameLayout.LayoutParams(72.dp, 72.dp))
             addView(infoGlass, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = 12.dp })
             addView(panelGlass, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(10.dp, 0, 10.dp, 10.dp) })
@@ -552,6 +564,31 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         listOf(eisBtn, gyroBtn, zebraBtn).forEach { it.selected(true) }
         evBar.progress = 0
         for (i in 0 until manualPanel.childCount) manualPanel.getChildAt(i).visibility = if (i < 2) View.VISIBLE else View.GONE
+    }
+
+    /** Jauge active en vidéo avec « Stab. Atelier » : vert = rattrapable, ambre = limite, rouge = trop fort. */
+    private fun setStabilityMeter(on: Boolean) {
+        if (on && stabMeter == null && resumed) {
+            val c = cam ?: return
+            stabMeter = StabilityMeter(this) { r -> runOnUiThread { showStability(r) } }.also { m ->
+                val phys = c.lens.chars.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)!!
+                val px = c.lens.chars.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)!!
+                val fSensor = c.lens.focalMm / (phys.width / px.width)
+                m.setOptics(fSensor.toDouble() * c.mode.size.width / px.width, c.mode.size.width, c.mode.size.height)
+                m.start()
+            }
+            stabBar.visibility = View.VISIBLE
+        } else if (!on) {
+            stabMeter?.stop(); stabMeter = null
+            if (::stabBar.isInitialized) stabBar.visibility = View.GONE
+        }
+    }
+
+    private fun showStability(r: Float) {
+        val w = (stabBar.width * r.coerceIn(0.02f, 1f)).toInt()
+        stabFill.layoutParams = stabFill.layoutParams.apply { width = w }
+        (stabFill.background as GradientDrawable).setColor(when { r < 0.6f -> accent; r < 1f -> 0xFFFFC94D.toInt(); else -> 0xFFFF5A4F.toInt() })
+        stabBar.contentDescription = "Stabilité ${(100 - (r * 100).coerceAtMost(100f)).toInt()} %"
     }
 
     // ------------------------------------------------------------------ gestes et retours (UX)
@@ -873,7 +910,8 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         if (photo == null) setBusy(false)
         // Enregistrement : l'info devient rouge, visible d'un coup d'œil.
         infoGlass.tint = if (cam?.recording == true) 0xB3C62828.toInt() else 0x40101418
-        val c = cam ?: return
+        val c = cam ?: run { setStabilityMeter(false); return }
+        setStabilityMeter(c.settings.gyroLog)
         hdrBtn.selected(c.mode.tenBit); hdrBtn.isEnabled = c.lens.supports(twin(c.mode)) || c.mode.tenBit
         zebraBtn.selected(c.tools.zebra); peakBtn.selected(c.tools.peaking); falseBtn.selected(c.tools.falseColor)
         flatBtn.selected(c.settings.flat); flatBtn.isEnabled = !c.mode.tenBit && !c.mode.highSpeed
