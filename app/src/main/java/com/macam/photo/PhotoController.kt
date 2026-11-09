@@ -60,6 +60,22 @@ class PhotoController(
     var superRes = false; private set
     var saveDng = false
     @Volatile var busy = false; private set
+    /** Signer les photos (Content Credentials / C2PA). */
+    @Volatile var authenticate = false
+        set(v) { field = v; if (v) motion.start() else if (mode != PhotoMode.NIGHT) motion.stop() }
+
+    /** Signataire pour cette capture, avec la description de la prise de vue. */
+    private fun signerFor(p: Plan?, frames: Int): ((java.io.File, java.io.File) -> Unit)? {
+        if (!authenticate || !com.macam.Pro.isPro) return null
+        val motionSnap = motion.samples()
+        val capture = org.json.JSONObject().apply {
+            put("mode", mode.name.lowercase()); put("lens_eq_mm", Math.round(lens.eqMm))
+            put("frames_merged", frames); put("zero_shutter_lag", p?.zsl == true)
+            p?.let { put("iso", it.iso); put("exposure_ns", it.exposureNs) }
+            put("captured_at", java.time.Instant.now().toString())
+        }
+        return { src, dst -> com.macam.auth.Authenticity.signJpeg(ctx, src, dst, capture, motionSnap) }
+    }
     /** Appelée avec l'URI de chaque photo enregistrée (vignette de la galerie). */
     var onSaved: (android.net.Uri) -> Unit = {}
     /** Zone de mise au point/exposition choisie au toucher (null = automatique). */
@@ -118,7 +134,7 @@ class PhotoController(
         profile = DeviceProfile(ctx, l.chars)
         calibration = com.macam.calib.SensorCalibration.load(ctx, l.id)
         superRes = sr && m == PhotoMode.PHOTO && profile.srScale > 0
-        if (m == PhotoMode.NIGHT) motion.start() else motion.stop()
+        if (m == PhotoMode.NIGHT || authenticate) motion.start() else motion.stop()
         // Le mode Portrait passe par l'extension du fabricant, disponible sur la caméra logique.
         val id = if (m == PhotoMode.PORTRAIT) logicalId(l.front) ?: return onError("Portrait indisponible") else l.id
         open(id, if (m == PhotoMode.PORTRAIT) id else l.parentId, m)
@@ -539,7 +555,7 @@ class PhotoController(
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         if (!engine.render(bmp, wb, ccm, look)) throw IllegalStateException("rendu refusé")
         val frames = engine.frames
-        onSaved(Saver.saveJpeg(ctx, bmp, rotation, name, p.iso.takeIf { it > 0 }, p.exposureNs.takeIf { it > 0 }, frames))
+        onSaved(Saver.saveJpeg(ctx, bmp, rotation, name, p.iso.takeIf { it > 0 }, p.exposureNs.takeIf { it > 0 }, frames, signerFor(p, frames)))
         bmp.recycle()
         rawBuf?.let { Saver.saveDng(ctx, lens.chars, result, it, Size(w, h), rotation, name) }
         onProgress(-1f)
@@ -593,8 +609,9 @@ class PhotoController(
             val buf = img.planes[0].buffer
             val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
             img.close()
+            val signer = signerFor(null, 1)
             worker.execute {
-                try { onSaved(Saver.saveJpegBytes(ctx, bytes, name)); celebrate("Portrait enregistré") }
+                try { onSaved(Saver.saveJpegBytes(ctx, bytes, name, signer)); celebrate("Portrait enregistré") }
                 catch (e: Exception) { onError("Enregistrement impossible : ${e.message}") }
                 finally { busy = false }
             }
@@ -617,6 +634,10 @@ class PhotoController(
 class MotionMeter(ctx: Context) : SensorEventListener {
     private val sm = ctx.getSystemService(SensorManager::class.java)
     private val values = ArrayDeque<Pair<Long, Double>>()
+    private val vectors = ArrayDeque<FloatArray>()
+
+    /** Mesures brutes (rad/s) de la dernière seconde : empreinte de mouvement de l'authenticité. */
+    @Synchronized fun samples(): List<FloatArray> = vectors.map { it.copyOf() }
     @Volatile private var active = false
 
     fun start() {
@@ -631,7 +652,8 @@ class MotionMeter(ctx: Context) : SensorEventListener {
     @Synchronized override fun onSensorChanged(e: SensorEvent) {
         val w = sqrt((e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]).toDouble())
         values.addLast(e.timestamp to w)
-        while (values.isNotEmpty() && e.timestamp - values.first().first > 1_000_000_000L) values.removeFirst()
+        vectors.addLast(floatArrayOf(e.values[0], e.values[1], e.values[2]))
+        while (values.isNotEmpty() && e.timestamp - values.first().first > 1_000_000_000L) { values.removeFirst(); vectors.removeFirstOrNull() }
     }
     override fun onAccuracyChanged(s: Sensor?, a: Int) {}
 }

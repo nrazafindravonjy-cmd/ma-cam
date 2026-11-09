@@ -42,7 +42,9 @@ object Saver {
     }
 
     /** JPEG qualité 95 avec orientation et métadonnées EXIF. */
-    fun saveJpeg(ctx: Context, bmp: Bitmap, rotation: Int, name: String, iso: Int?, exposureNs: Long?, frames: Int): android.net.Uri {
+    /** [sign] (facultatif) signe le JPEG finalisé (EXIF compris) : src → dst. */
+    fun saveJpeg(ctx: Context, bmp: Bitmap, rotation: Int, name: String, iso: Int?, exposureNs: Long?, frames: Int,
+                 sign: ((File, File) -> Unit)? = null): android.net.Uri {
         val tmp = File(ctx.cacheDir, "$name.jpg")
         tmp.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
         ExifInterface(tmp.absolutePath).apply {
@@ -56,12 +58,24 @@ object Saver {
             exposureNs?.let { setAttribute(ExifInterface.TAG_EXPOSURE_TIME, (it / 1e9).toString()) }
             saveAttributes()
         }
-        return try { insert(ctx, "$name.jpg", "image/jpeg") { out -> tmp.inputStream().use { it.copyTo(out) } } }
-        finally { tmp.delete() }
+        val out = signed(ctx, tmp, name, sign)
+        return try { insert(ctx, "$name.jpg", "image/jpeg") { o -> out.inputStream().use { it.copyTo(o) } } }
+        finally { tmp.delete(); out.delete() }
     }
 
-    fun saveJpegBytes(ctx: Context, bytes: ByteArray, name: String) =
-        insert(ctx, "$name.jpg", "image/jpeg") { it.write(bytes) }
+    /** Applique la signature si demandée ; en cas d'échec, la photo est gardée non signée (jamais perdue). */
+    private fun signed(ctx: Context, src: File, name: String, sign: ((File, File) -> Unit)?): File {
+        if (sign == null) return src
+        val dst = File(ctx.cacheDir, "${name}_c2pa.jpg")
+        return try { sign(src, dst); dst } catch (e: Throwable) { android.util.Log.w("Saver", "signature impossible", e); dst.delete(); src }
+    }
+
+    fun saveJpegBytes(ctx: Context, bytes: ByteArray, name: String, sign: ((File, File) -> Unit)? = null): android.net.Uri {
+        val tmp = File(ctx.cacheDir, "$name.jpg").apply { writeBytes(bytes) }
+        val out = signed(ctx, tmp, name, sign)
+        return try { insert(ctx, "$name.jpg", "image/jpeg") { o -> out.inputStream().use { it.copyTo(o) } } }
+        finally { tmp.delete(); out.delete() }
+    }
 
     /** DNG à partir de la mosaïque fusionnée : un RAW 16 bits bien moins bruité qu'un RAW simple. */
     fun saveDng(ctx: Context, chars: CameraCharacteristics, result: CaptureResult, raw: ByteBuffer,

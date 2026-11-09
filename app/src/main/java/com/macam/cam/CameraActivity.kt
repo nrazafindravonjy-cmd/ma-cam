@@ -225,6 +225,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
                 onError = toast)
             photo!!.onSaved = { uri -> runOnUiThread { showThumbnail(uri) } }
             photo!!.onFirstFrame = ::recordStartup
+            photo!!.authenticate = prefs.getBoolean("authenticate", false) && com.macam.Pro.isPro
             photo!!.onProgress = { f -> runOnUiThread { progress = f; styleShutter() } }
             photo!!.start(m = mode)
             showOverlay(null)
@@ -332,6 +333,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var imageHeader: TextView
     private lateinit var aidsHeader: TextView
     private lateinit var hdrBtn: Button
+    private lateinit var authBtn: Button
     private var iconRotation = 0f
     private val prefs by lazy { getSharedPreferences("macam", MODE_PRIVATE) }
     private val blurHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -390,9 +392,18 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         val studioBtn = chip("Atelier", R.drawable.ic_studio) { openStudio(null) }
         toolsRow = row().apply { listOf(studioBtn, zebraBtn, peakBtn, falseBtn, flatBtn, gyroBtn).forEach { addView(it) } }
         dngBtn = chip("RAW", R.drawable.ic_raw) { photo?.let { it.saveDng = !it.saveDng }; refreshButtons() }
+        authBtn = chip("Authentifier", R.drawable.ic_shield) {
+            com.macam.Pro.gate(this, "Authenticité") {
+                val on = !prefs.getBoolean("authenticate", false)
+                prefs.edit().putBoolean("authenticate", on).apply()
+                photo?.authenticate = on
+                if (on) info.text = "Photos signées (Content Credentials) · clé dans la puce sécurisée"
+                refreshButtons()
+            }
+        }
         photoRow = row().apply {
             gravity = Gravity.CENTER_HORIZONTAL
-            addView(dngBtn)
+            addView(dngBtn); addView(authBtn)
         }
         val tabIcons = mapOf(Tab.PHOTO to R.drawable.ic_photo, Tab.NIGHT to R.drawable.ic_night,
             Tab.PORTRAIT to R.drawable.ic_portrait, Tab.VIDEO to R.drawable.ic_video)
@@ -855,6 +866,7 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         styleShutter()
         photo?.let { p ->
             dngBtn.selected(p.saveDng); dngBtn.isEnabled = p.mode != PhotoMode.PORTRAIT
+            authBtn.selected(p.authenticate)
             recordBtn.isEnabled = !p.busy
             setBusy(p.busy)
         }
