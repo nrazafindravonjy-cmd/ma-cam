@@ -4,5 +4,11 @@
   "command": "/opt/android-sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android29 --sysroot=/opt/android-sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dmacam_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -fno-limit-debug-info  -fPIC -O3 -ffast-math -fno-exceptions -Wall -o CMakeFiles/macam.dir/engine.cpp.o -c /home/user/ma-cam/app/src/main/cpp/engine.cpp",
   "file": "/home/user/ma-cam/app/src/main/cpp/engine.cpp",
   "output": "CMakeFiles/macam.dir/engine.cpp.o"
+},
+{
+  "directory": "/home/user/ma-cam/app/.cxx/Debug/4x6r1441/arm64-v8a",
+  "command": "/opt/android-sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android29 --sysroot=/opt/android-sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dmacam_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -fno-limit-debug-info  -fPIC -O3 -ffast-math -fno-exceptions -Wall -o CMakeFiles/macam.dir/fusion.cpp.o -c /home/user/ma-cam/app/src/main/cpp/fusion.cpp",
+  "file": "/home/user/ma-cam/app/src/main/cpp/fusion.cpp",
+  "output": "CMakeFiles/macam.dir/fusion.cpp.o"
 }
 ]

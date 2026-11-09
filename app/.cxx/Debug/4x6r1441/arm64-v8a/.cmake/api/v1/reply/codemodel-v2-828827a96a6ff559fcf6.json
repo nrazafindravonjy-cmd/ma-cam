@@ -39,7 +39,7 @@
 				{
 					"directoryIndex" : 0,
 					"id" : "macam::@6890427a1f51a3e7e1df",
-					"jsonFile" : "target-macam-Debug-c853546db66550b6c7da.json",
+					"jsonFile" : "target-macam-Debug-bfc934095b434fdff933.json",
 					"name" : "macam",
 					"projectIndex" : 0
 				}
@@ -49,7 +49,7 @@
 	"kind" : "codemodel",
 	"paths" : 
 	{
-		"build" : "/home/user/ma-cam/app/.cxx/Debug/4x6r1441/armeabi-v7a",
+		"build" : "/home/user/ma-cam/app/.cxx/Debug/4x6r1441/arm64-v8a",
 		"source" : "/home/user/ma-cam/app/src/main/cpp"
 	},
 	"version" : 

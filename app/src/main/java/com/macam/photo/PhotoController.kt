@@ -112,7 +112,19 @@ class PhotoController(
 
     // ---- Zéro délai (ZSL) : les dernières images du capteur sont gardées en mémoire en permanence.
     /** Actif en mode Photo : la rafale est déjà prise au moment de l'appui. */
-    private val zsl get() = mode == PhotoMode.PHOTO
+    private val zsl get() = mode == PhotoMode.PHOTO && !fusion
+
+    // ---- Fusion de deux objectifs : ultra grand-angle + principal capturés au même instant (caméra logique).
+    @Volatile var fusion = false; private set
+    private var mainLens: Lens? = null
+    private var readerMain: ImageReader? = null
+
+    private fun fusionPossible(l: Lens): Boolean {
+        val main = Lens.main(lenses)
+        return mode == PhotoMode.PHOTO && !l.front && l != main && l.eqMm < main.eqMm * 0.85 &&
+            l.parentId != l.id && main.parentId == l.parentId && profile.tier == DeviceProfile.Tier.HIGH &&
+            !com.macam.cam.Quirks.has("noFusion:${l.parentId}")
+    }
     private val zslDepth get() = profile.frames(false)
     private val ring = ArrayDeque<android.media.Image>()
     private val ringResults = LinkedHashMap<Long, TotalCaptureResult>()
@@ -120,6 +132,7 @@ class PhotoController(
 
     private fun close() {
         clearRing()
+        runCatching { readerMain?.close() }; readerMain = null
         runCatching { session?.close() }; session = null
         runCatching { extSession?.close() }; extSession = null
         device?.let { closed = CountDownLatch(1); runCatching { it.close() } }
@@ -133,11 +146,14 @@ class PhotoController(
         lens = l; mode = m
         profile = DeviceProfile(ctx, l.chars)
         calibration = com.macam.calib.SensorCalibration.load(ctx, l.id)
+        fusion = fusionPossible(l)
+        mainLens = if (fusion) Lens.main(lenses) else null
         superRes = sr && m == PhotoMode.PHOTO && profile.srScale > 0
         if (m == PhotoMode.NIGHT || authenticate) motion.start() else motion.stop()
         // Le mode Portrait passe par l'extension du fabricant, disponible sur la caméra logique.
         val id = if (m == PhotoMode.PORTRAIT) logicalId(l.front) ?: return onError("Portrait indisponible") else l.id
-        open(id, if (m == PhotoMode.PORTRAIT) id else l.parentId, m)
+        // En fusion, on ouvre la caméra logique pour recevoir les deux objectifs en même temps.
+        if (fusion) open(l.parentId, l.parentId, m) else open(id, if (m == PhotoMode.PORTRAIT) id else l.parentId, m)
     }
 
     /** Repli sur la caméra logique si l'objectif physique ne peut pas être ouvert directement. */
@@ -149,7 +165,7 @@ class PhotoController(
             cm.openCamera(id, executor, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) {
                     device = d
-                    try { if (m == PhotoMode.PORTRAIT) configurePortrait(d) else configure(d) }
+                    try { if (m == PhotoMode.PORTRAIT) configurePortrait(d) else if (fusion) configureFusion(d) else configure(d) }
                     catch (e: Exception) { onError("Session impossible : ${e.message}") }
                 }
                 override fun onDisconnected(d: CameraDevice) { d.close() }
@@ -210,6 +226,67 @@ class PhotoController(
                 }
             }))
         onStatus(statusLine())
+    }
+
+    /** Session logique : aperçu et image sur l'ultra grand-angle, image simultanée sur le principal. */
+    private fun configureFusion(d: CameraDevice) {
+        val main = mainLens ?: return configure(d)
+        fun maxYuv(l: Lens) = l.chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
+            .getOutputSizes(ImageFormat.YUV_420_888).filter { abs(it.width * 3 - it.height * 4) < it.width / 20 }.maxBy { it.width * it.height }
+        val su = maxYuv(lens); val sm = maxYuv(main)
+        val ru = ImageReader.newInstance(su.width, su.height, ImageFormat.YUV_420_888, 2)
+        val rm = ImageReader.newInstance(sm.width, sm.height, ImageFormat.YUV_420_888, 2)
+        reader = ru; readerMain = rm
+        val pv = previewSurface(previewSize()); preview = pv
+        if (!pv.isValid) return onError("Aperçu indisponible, réessayez")
+        val outs = listOf(
+            OutputConfiguration(pv).apply { setPhysicalCameraId(lens.id) },
+            OutputConfiguration(ru.surface).apply { setPhysicalCameraId(lens.id) },
+            OutputConfiguration(rm.surface).apply { setPhysicalCameraId(main.id) },
+        )
+        d.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outs, executor,
+            object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(s: CameraCaptureSession) { session = s; startPreview(); onStatus("Ultra grand-angle + fusion du principal") }
+                override fun onConfigureFailed(s: CameraCaptureSession) {
+                    // Combinaison refusée par ce téléphone : retenue, puis ultra grand-angle seul.
+                    com.macam.cam.Quirks.set("noFusion:${lens.parentId}")
+                    handler.post { reopen(lens, mode, false) }
+                }
+            }))
+    }
+
+    /** Capture simultanée des deux objectifs, puis fusion et enregistrement. */
+    private fun captureFusion(rotation: Int, name: String) {
+        val s = session ?: return; val d = device ?: return
+        val ru = reader ?: return; val rm = readerMain ?: return; val main = mainLens ?: return
+        var uw: android.graphics.Bitmap? = null; var mn: android.graphics.Bitmap? = null
+        val both = CountDownLatch(2)
+        ru.setOnImageAvailableListener({ r -> r.acquireNextImage()?.let { uw = LensFusion.toBitmap(it); it.close(); both.countDown() } }, handler)
+        rm.setOnImageAvailableListener({ r -> r.acquireNextImage()?.let { mn = LensFusion.toBitmap(it); it.close(); both.countDown() } }, handler)
+        onStatus("Fusion des deux objectifs…"); onProgress(0.3f)
+        val req = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+            addTarget(ru.surface); addTarget(rm.surface); addTarget(preview!!)
+            set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY)
+        }.build()
+        var result: TotalCaptureResult? = null
+        s.capture(req, object : CameraCaptureSession.CaptureCallback() {
+            override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, t: TotalCaptureResult) { result = t }
+        }, handler)
+        worker.execute {
+            try {
+                if (!both.await(5, TimeUnit.SECONDS)) throw IllegalStateException("images manquantes")
+                onProgress(0.7f)
+                val base = uw!!; val det = mn!!
+                val score = LensFusion.fuse(base, det, (lens.eqMm / main.eqMm).toFloat())
+                det.recycle()
+                val iso = result?.get(CaptureResult.SENSOR_SENSITIVITY); val exp = result?.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+                onSaved(Saver.saveJpeg(ctx, base, rotation, name, iso, exp, 2, signerFor(null, 2)))
+                base.recycle()
+                onProgress(-1f)
+                celebrate(if (score >= 0.5f) "Photo enregistrée · 2 objectifs fusionnés" else "Photo enregistrée (fusion impossible sur cette scène)")
+            } catch (e: Throwable) { onProgress(-1f); onError("Fusion impossible : ${e.message}") }
+            finally { busy = false }
+        }
     }
 
     /** Statut court et sans jargon (attention sélective, charge cognitive). */
@@ -358,6 +435,7 @@ class PhotoController(
         busy = true
         val rotation = jpegRotation(deviceOrientation)
         val name = "MaCam_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        if (fusion) return@post captureFusion(rotation, name)
         if (zsl && ring.size >= 2) return@post captureZsl(rotation, name)
         val p = plan()
         val total = p.exposureNs * p.frames / 1e9

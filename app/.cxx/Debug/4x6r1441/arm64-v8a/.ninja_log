@@ -1,11 +1,5 @@
 # ninja log v6
-1	2977	1793982843313768368	CMakeFiles/macam.dir/engine.cpp.o	b18c10e62882d066
-2978	3005	1793982846290210017	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	7c590816b1ed1e70
-3	2975	1793983071380139761	CMakeFiles/macam.dir/engine.cpp.o	b18c10e62882d066
-2976	3016	1793983074356139938	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	7c590816b1ed1e70
-2	2873	1793983155260144747	CMakeFiles/macam.dir/engine.cpp.o	b18c10e62882d066
-2873	2898	1793983158132144917	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	7c590816b1ed1e70
-2	11745	1794232243356444607	CMakeFiles/macam.dir/engine.cpp.o	b18c10e62882d066
-11745	14649	1794232255100445027	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	7c590816b1ed1e70
-2	2423	1794232600548457381	CMakeFiles/macam.dir/engine.cpp.o	b18c10e62882d066
 2423	2456	1794232602968457467	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	7c590816b1ed1e70
+2	2423	1794232600548457381	CMakeFiles/macam.dir/engine.cpp.o	b18c10e62882d066
+3	564	1794232999512471649	CMakeFiles/macam.dir/fusion.cpp.o	185f96c0ec087bf7
+564	597	1794233000078325391	/home/user/ma-cam/app/build/intermediates/cxx/Debug/4x6r1441/obj/arm64-v8a/libmacam.so	312533b831dfd17a
