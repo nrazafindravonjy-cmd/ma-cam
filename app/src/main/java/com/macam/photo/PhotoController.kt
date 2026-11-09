@@ -329,7 +329,7 @@ class PhotoController(
         d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(preview!!)
             set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-            if (!lens.fixedFocus) set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            if (!lens.fixedFocus && lens.afPicture) set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             if (lens.hasOis) set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
             if (superRes && Build.VERSION.SDK_INT >= 30) set(CaptureRequest.CONTROL_ZOOM_RATIO, 2f)
             meteringRegion?.let { r ->

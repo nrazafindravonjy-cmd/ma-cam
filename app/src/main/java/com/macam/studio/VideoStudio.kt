@@ -65,15 +65,21 @@ class VideoStudio(private val ctx: Context) {
         // HDR conservé si la source est HLG, qu'aucun look SDR n'est demandé et que le GPU sait le faire.
         val srcHlg = vFmt.containsKey(MediaFormat.KEY_COLOR_TRANSFER) &&
             vFmt.getInteger(MediaFormat.KEY_COLOR_TRANSFER) == MediaFormat.COLOR_TRANSFER_HLG
-        val egl = Egl(tryHdr = srcHlg && opts.lut == null)
+        // Le HDR n'est tenté que si un encodeur 10 bits existe : la surface GPU 10 bits HLG doit l'alimenter.
+        val hdrCodec = com.macam.cam.Codecs.pick(android.util.Size(w, h), fps, true)
+        val egl = Egl(tryHdr = srcHlg && opts.lut == null && hdrCodec != null)
+        // Encodeur : HEVC 10 bits si HDR, sinon HEVC ou H.264 (universel).
+        val choice = (if (egl.hdr) hdrCodec else null)
+            ?: com.macam.cam.Codecs.pick(android.util.Size(w, h), fps, false)
+            ?: com.macam.cam.Codecs.Choice(MediaFormat.MIMETYPE_VIDEO_AVC, 20_000_000, false)
         val hdr = egl.hdr
         lastRunHdr = hdr
         lastRunSourceHdr = srcHlg
 
-        val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
-        enc.configure(MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, w, h).apply {
+        val enc = MediaCodec.createEncoderByType(choice.mime)
+        enc.configure(MediaFormat.createVideoFormat(choice.mime, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, srcBitrate.coerceIn(20_000_000, 100_000_000))
+            setInteger(MediaFormat.KEY_BIT_RATE, srcBitrate.coerceIn(8_000_000, 100_000_000).coerceAtMost(choice.maxBitrate))
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             // Traitement hors temps réel : on demande au codec d'aller aussi vite que possible.

@@ -212,6 +212,13 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
 
     private fun startCamera() {
         if (calibrating) return // la calibration tient la caméra ; elle relancera l'aperçu à la fin
+        try { startCameraInternal() } catch (e: NoCameraException) {
+            cam = null; photo = null
+            info.text = "Aucune caméra utilisable sur cet appareil"
+        }
+    }
+
+    private fun startCameraInternal() {
         if (cam != null || photo != null) return
         val toast: (String) -> Unit = { e -> runOnUiThread { Toast.makeText(this, e, Toast.LENGTH_LONG).show() } }
         if (tab == Tab.VIDEO) {
@@ -302,8 +309,19 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     override fun surfaceDestroyed(h: SurfaceHolder) { surfaceSize = null }
 
     /** L'aperçu est en paysage (16:9) mais l'écran est en portrait : on affiche en 9:16. */
+    private var lastPreviewSize = Size(1440, 1080)
+
+    /** Tablettes et pliables : Android 16 ignore le verrou portrait sur grand écran → on recalcule la mise en page. */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        layoutPreview(lastPreviewSize)
+    }
+
     private fun layoutPreview(size: Size) {
-        val w = resources.displayMetrics.widthPixels
+        lastPreviewSize = size
+        // Aperçu en portrait (côté long vertical), ajusté pour tenir dans l'écran quelle que soit son orientation.
+        val dm = resources.displayMetrics
+        val w = minOf(dm.widthPixels, (dm.heightPixels.toLong() * size.height / size.width).toInt())
         // L'aperçu part du haut : l'info flotte dessus, et le bas passe sous la carte de verre.
         val tall = size.width * 3 > size.height * 4 + 1
         // Photo 4:3 : ancrée par le bas, ses 70 derniers dp passent sous la carte de verre.
@@ -968,13 +986,13 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
         clapBtn.selected(c.settings.syncClap)
         hdrBtn.selected(c.mode.tenBit); hdrBtn.isEnabled = c.lens.supports(twin(c.mode)) || c.mode.tenBit
         zebraBtn.selected(c.tools.zebra); peakBtn.selected(c.tools.peaking); falseBtn.selected(c.tools.falseColor)
-        flatBtn.selected(c.settings.flat); flatBtn.isEnabled = !c.mode.tenBit && !c.mode.highSpeed
+        flatBtn.selected(c.settings.flat); flatBtn.isEnabled = !c.mode.tenBit && !c.mode.highSpeed && c.lens.curveTonemap
         val st = c.settings
         val hs = c.mode.highSpeed
         expoBtn.text = when (st.exposure) { Exposure.AUTO -> "Expo auto"; Exposure.LOCK -> "Expo verrouillée"; Exposure.MANUAL -> "Expo manuelle" }
         expoBtn.selected(st.exposure != Exposure.AUTO)
         focusBtn.text = if (c.lens.fixedFocus) "Netteté fixe" else if (st.manualFocus) "Netteté manuelle" else "Netteté auto"
-        focusBtn.selected(st.manualFocus); focusBtn.isEnabled = !c.lens.fixedFocus && !hs
+        focusBtn.selected(st.manualFocus); focusBtn.isEnabled = !c.lens.fixedFocus && !hs && c.lens.manualSensor
         wbBtn.text = wbModes[wbIndex].first; wbBtn.selected(wbIndex != 0)
         eisBtn.text = if (st.eis) "Stabilisation" else "Stab. coupée"; eisBtn.selected(!st.eis)
         rateBtn.text = "${st.bitrateMbps} Mb/s"
@@ -1008,7 +1026,9 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
     private fun cycleExposure() {
         val c = cam ?: return
         val st = c.settings
-        st.exposure = Exposure.entries[(st.exposure.ordinal + 1) % Exposure.entries.size]
+        // Sans contrôle manuel du capteur (beaucoup d'entrées de gamme), on alterne seulement auto / verrou.
+        val allowed = Exposure.entries.filter { it != Exposure.MANUAL || c.lens.manualSensor }
+        st.exposure = allowed[(allowed.indexOf(st.exposure) + 1) % allowed.size]
         if (st.exposure == Exposure.MANUAL) c.lastInfo?.let { st.iso = it.iso; st.exposureNs = it.exposureNs }
         c.applySettings(); refreshButtons()
     }
@@ -1022,7 +1042,8 @@ class CameraActivity : Activity(), SurfaceHolder.Callback {
 
     private fun cycleWb() {
         val c = cam ?: return
-        wbIndex = (wbIndex + 1) % wbModes.size
+        // Seuls les préréglages proposés par cet objectif.
+        do { wbIndex = (wbIndex + 1) % wbModes.size } while (wbIndex != 0 && wbModes[wbIndex].second != -1 && !c.lens.awbSupported(wbModes[wbIndex].second))
         val mode = wbModes[wbIndex].second
         c.settings.awbLock = mode == -1
         c.settings.awbMode = if (mode == -1) CameraMetadata.CONTROL_AWB_MODE_AUTO else mode

@@ -31,8 +31,28 @@ class Lens(val id: String, val chars: CameraCharacteristics, val front: Boolean,
     val minFocusDiopters = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
     val isoRange: Range<Int> = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: Range(100, 3200)
     val hasOis = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.contains(1) == true
+
+    // Réglages réellement proposés par cet objectif : en demander un absent peut faire refuser la requête
+    // (fréquent sur les appareils Camera2 « LEGACY » / « LIMITED »).
+    private fun has(key: CameraCharacteristics.Key<IntArray>, v: Int) = chars.get(key)?.contains(v) == true
+    val manualSensor = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+        ?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true
+    val afVideo = has(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+    val afPicture = has(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+    val eisAvailable = has(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+    val curveTonemap = has(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)
+    fun awbSupported(mode: Int) = has(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES, mode)
+    val aeLock = chars.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE) == true
+    val awbLockAvailable = chars.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) == true
     val realtimeClock = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
         CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+
+    /**
+     * Plage de cadence pour [fps] : fixe [fps, fps] si annoncée, sinon la plus étroite qui finit à [fps]
+     * (beaucoup d'appareils d'entrée de gamme n'annoncent que [15, 30]).
+     */
+    fun fpsRange(fps: Int): Range<Int>? = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+        ?.filter { it.upper == fps }?.maxByOrNull { it.lower }
 
     fun supports(m: Mode): Boolean {
         val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return false
@@ -40,10 +60,10 @@ class Lens(val id: String, val chars: CameraCharacteristics, val front: Boolean,
             return map.highSpeedVideoSizes.contains(m.size) &&
                 map.getHighSpeedVideoFpsRangesFor(m.size).contains(Range(m.fps, m.fps))
         }
-        val fpsOk = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-            ?.contains(Range(m.fps, m.fps)) == true
+        val fpsOk = fpsRange(m.fps) != null
         val sizeOk = map.getOutputSizes(MediaCodec::class.java)?.contains(m.size) == true &&
-            !Quirks.has(Quirks.badMode(id, m.name))
+            !Quirks.has(Quirks.badMode(id, m.name)) &&
+            Codecs.pick(m.size, m.fps, m.tenBit) != null // un encodeur doit savoir le faire (HEVC ou H.264)
         val hdrOk = !m.tenBit || (Build.VERSION.SDK_INT >= 33 && chars.get(
             CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES)?.supportedProfiles
             ?.contains(DynamicRangeProfiles.HLG10) == true)
@@ -72,9 +92,13 @@ class Lens(val id: String, val chars: CameraCharacteristics, val front: Boolean,
         }
 
         /** Objectif principal : arrière stabilisé si possible (beaucoup de modèles d'entrée de gamme n'ont pas d'OIS). */
-        fun main(list: List<Lens>) = list.firstOrNull { !it.front && it.hasOis } ?: list.firstOrNull { !it.front } ?: list.first()
+        fun main(list: List<Lens>) = list.firstOrNull { !it.front && it.hasOis } ?: list.firstOrNull { !it.front }
+            ?: list.firstOrNull() ?: throw NoCameraException()
     }
 }
+
+/** Aucune caméra utilisable (appareil sans caméra, ou toutes refusées par le système). */
+class NoCameraException : IllegalStateException("Aucune caméra utilisable sur cet appareil")
 
 enum class Mode(val label: String, val size: Size, val fps: Int, val tenBit: Boolean, val highSpeed: Boolean) {
     UHD30_HLG("4K30 HDR", Size(3840, 2160), 30, true, false),
@@ -88,6 +112,8 @@ enum class Mode(val label: String, val size: Size, val fps: Int, val tenBit: Boo
     FHD60_SDR("1080p60", Size(1920, 1080), 60, false, false),
     FHD120("1080p120", Size(1920, 1080), 120, false, true),
     FHD240("1080p240", Size(1920, 1080), 240, false, true),
+    // Pour les téléphones qui ne savent pas filmer en 1080p.
+    HD30("720p30", Size(1280, 720), 30, false, false),
 }
 
 enum class Exposure { AUTO, LOCK, MANUAL }
@@ -361,7 +387,8 @@ class CameraController(
         if (!tools.anyEnabled) onOverlay(null)
         val b = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         targets.forEach { b.addTarget(it) }
-        b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(mode.fps, mode.fps))
+        b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+            if (mode.highSpeed) Range(mode.fps, mode.fps) else lens.fpsRange(mode.fps) ?: Range(mode.fps, mode.fps))
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
         if (Build.VERSION.SDK_INT >= 30 && st.zoom > 1f && !mode.highSpeed)
             b.set(CaptureRequest.CONTROL_ZOOM_RATIO, st.zoom.coerceIn(zoomRange.lower, zoomRange.upper))
@@ -372,10 +399,10 @@ class CameraController(
 
         if (!mode.highSpeed) {
             b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-                if (st.eis) CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+                if (st.eis && lens.eisAvailable) CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
             if (lens.hasOis) b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
 
-            when (st.exposure) {
+            when (if (st.exposure == Exposure.MANUAL && !lens.manualSensor) Exposure.AUTO else st.exposure) {
                 Exposure.MANUAL -> {
                     b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
                     b.set(CaptureRequest.SENSOR_SENSITIVITY, st.iso.coerceIn(lens.isoRange.lower, lens.isoRange.upper))
@@ -385,25 +412,25 @@ class CameraController(
                 else -> {
                     b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
                     b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, st.evSteps)
-                    b.set(CaptureRequest.CONTROL_AE_LOCK, st.exposure == Exposure.LOCK)
+                    if (lens.aeLock) b.set(CaptureRequest.CONTROL_AE_LOCK, st.exposure == Exposure.LOCK)
                 }
             }
             if (!lens.fixedFocus) {
-                if (st.manualFocus) {
+                if (st.manualFocus && lens.manualSensor) {
                     b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
                     b.set(CaptureRequest.LENS_FOCUS_DISTANCE, st.focusDiopters.coerceIn(0f, lens.minFocusDiopters))
-                } else b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                } else if (lens.afVideo) b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             }
-            if (st.flat && !mode.tenBit) {
+            if (st.flat && !mode.tenBit && lens.curveTonemap) {
                 val pts = lens.chars.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 0
                 if (pts >= 2) {
                     b.set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)
                     b.set(CaptureRequest.TONEMAP_CURVE, ProTools.flatCurve(minOf(pts, 64)))
                 }
             }
-            b.set(CaptureRequest.CONTROL_AWB_MODE, st.awbMode)
-            b.set(CaptureRequest.CONTROL_AWB_LOCK, st.awbLock)
-        } else if (!lens.fixedFocus) {
+            b.set(CaptureRequest.CONTROL_AWB_MODE, if (lens.awbSupported(st.awbMode)) st.awbMode else CameraMetadata.CONTROL_AWB_MODE_AUTO)
+            if (lens.awbLockAvailable) b.set(CaptureRequest.CONTROL_AWB_LOCK, st.awbLock)
+        } else if (!lens.fixedFocus && lens.afVideo) {
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
         }
 

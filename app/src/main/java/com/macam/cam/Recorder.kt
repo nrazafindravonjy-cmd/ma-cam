@@ -56,19 +56,22 @@ class Recorder(
     private var muxerStarted = false
     private var samplesWritten = 0
     private val pending = ArrayList<Triple<Boolean, ByteBuffer, MediaCodec.BufferInfo>>()
+    private var channels = 2
 
     fun arm() {
-        video = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
-        video.configure(MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, size.width, size.height).apply {
+        // HEVC si le téléphone sait l'encoder à cette taille/cadence, sinon H.264 (universel).
+        val choice = Codecs.pick(size, fps, tenBit) ?: Codecs.Choice(MediaFormat.MIMETYPE_VIDEO_AVC, 20_000_000, false)
+        video = MediaCodec.createEncoderByType(choice.mime)
+        video.configure(MediaFormat.createVideoFormat(choice.mime, size.width, size.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+            setInteger(MediaFormat.KEY_BIT_RATE, minOf(bitrate, choice.maxBitrate))
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
             // Temps réel + cadence explicite : indispensable pour tenir 120/240 i/s.
             setInteger(MediaFormat.KEY_PRIORITY, 0)
             setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
-            if (tenBit) {
+            if (tenBit && choice.tenBit) {
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10)
                 setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
                 setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_HLG)
@@ -97,14 +100,19 @@ class Recorder(
         muxer = MediaMuxer(pfd!!.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             .apply { setOrientationHint(orientationHint) }
 
-        audioRecord = try {
-            val min = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
-            AudioRecord(MediaRecorder.AudioSource.CAMCORDER, SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO,
-                AudioFormat.ENCODING_PCM_16BIT, min * 4).takeIf { it.state == AudioRecord.STATE_INITIALIZED }
-        } catch (e: Exception) { Log.w(TAG, "micro indisponible", e); null }
+        // Stéréo du micro « caméscope » si possible ; sinon mono, puis micro standard (beaucoup d'entrées de gamme).
+        for ((src, mask) in listOf(MediaRecorder.AudioSource.CAMCORDER to AudioFormat.CHANNEL_IN_STEREO,
+                MediaRecorder.AudioSource.CAMCORDER to AudioFormat.CHANNEL_IN_MONO, MediaRecorder.AudioSource.MIC to AudioFormat.CHANNEL_IN_MONO)) {
+            audioRecord = try {
+                val min = AudioRecord.getMinBufferSize(SAMPLE_RATE, mask, AudioFormat.ENCODING_PCM_16BIT)
+                if (min <= 0) null else AudioRecord(src, SAMPLE_RATE, mask, AudioFormat.ENCODING_PCM_16BIT, min * 4)
+                    .let { r -> if (r.state == AudioRecord.STATE_INITIALIZED) r else { r.release(); null } }
+            } catch (e: Exception) { Log.w(TAG, "micro indisponible", e); null }
+            if (audioRecord != null) { channels = if (mask == AudioFormat.CHANNEL_IN_STEREO) 2 else 1; break }
+        }
         if (audioRecord != null) {
             audio = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
-                configure(MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, SAMPLE_RATE, 2).apply {
+                configure(MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, SAMPLE_RATE, channels).apply {
                     setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
                     setInteger(MediaFormat.KEY_BIT_RATE, 256_000)
                     setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
@@ -167,7 +175,7 @@ class Recorder(
             buf.clear()
             val read = rec.read(buf, minOf(buf.remaining(), 4096)).coerceAtLeast(0)
             a.queueInputBuffer(idx, 0, read, startNs / 1000 + samples * 1_000_000 / SAMPLE_RATE, 0)
-            samples += read / 4 // 2 canaux × 16 bits
+            samples += read / (2 * channels) // 16 bits par canal
         }
     }
 

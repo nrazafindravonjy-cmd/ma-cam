@@ -10,9 +10,9 @@ android {
         applicationId = "com.macam"
         minSdk = 29
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.16"
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        versionCode = 17
+        versionName = "0.17"
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
         externalNativeBuild { cmake { arguments += "-DANDROID_ARM_NEON=TRUE" } }
     }
     ndkVersion = "27.1.12297006"
